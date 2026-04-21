@@ -24,7 +24,7 @@ You don't have to *run* an encrypted iOS app to decrypt it. After `posix_spawn` 
 
 ### On your computer
 - macOS, Linux, or Windows - anything that can SSH into the device
-- Go 1.24+ for building from source (prebuilt binaries on the releases page)
+- Go 1.25+ for building from source (prebuilt binaries are on the releases page)
 - Jailbroken iPhone reachable over the network
 
 ### On the jailbroken iPhone
@@ -49,7 +49,7 @@ Using go install:
 go install github.com/londek/ipadecrypt/cmd/ipadecrypt@latest
 ```
 
-From source:
+From source (refer to [BUILDING.md](BUILDING.md) for detailed instructions):
 
 ```sh
 git clone https://github.com/londek/ipadecrypt
