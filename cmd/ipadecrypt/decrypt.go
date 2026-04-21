@@ -3,8 +3,10 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 
@@ -14,6 +16,45 @@ import (
 	"github.com/londek/ipadecrypt/internal/tui"
 	"github.com/spf13/cobra"
 )
+
+var appStoreIDRe = regexp.MustCompile(`/id(\d+)`)
+
+type decryptTarget struct {
+	// localPath is set when the user passed a path to an existing .ipa.
+	// When set, the App Store download flow is skipped.
+	localPath string
+	// lookupID is a bundle ID or numeric App Store trackId to resolve
+	// against iTunes lookup. Set when localPath is empty.
+	lookupID string
+}
+
+func parseDecryptArg(raw string) (decryptTarget, error) {
+	// App Store URL
+	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
+		u, err := url.Parse(raw)
+		if err != nil {
+			return decryptTarget{}, fmt.Errorf("parse url: %w", err)
+		}
+		m := appStoreIDRe.FindStringSubmatch(u.Path)
+		if m == nil {
+			return decryptTarget{}, fmt.Errorf("no /id<digits> in url %s", raw)
+		}
+		return decryptTarget{lookupID: m[1]}, nil
+	}
+
+	// Local .ipa path
+	if strings.HasSuffix(strings.ToLower(raw), ".ipa") {
+		if info, err := os.Stat(raw); err == nil && !info.IsDir() {
+			abs, aerr := filepath.Abs(raw)
+			if aerr != nil {
+				return decryptTarget{}, aerr
+			}
+			return decryptTarget{localPath: abs}, nil
+		}
+	}
+
+	return decryptTarget{lookupID: raw}, nil
+}
 
 func decryptHandler(cmd *cobra.Command, args []string) error {
 	ctx, cancel := notifyContext()
@@ -25,21 +66,34 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if cfg.Apple.Account == nil || cfg.Device.Host == "" {
-		tui.Err("bootstrap not completed")
-		tui.Info("run `ipadecrypt bootstrap` first to sign in to the App Store and verify your device")
-		return errors.New("bootstrap not completed")
-	}
-
-	appRef := args[0]
-
-	as, err := appstore.New(filepath.Join(paths.Root, "cookies"))
+	target, err := parseDecryptArg(args[0])
 	if err != nil {
-		tui.Err("appstore client: %v", err)
+		tui.Err("%v", err)
 		return err
 	}
 
-	tui.OK("signed in as %s", cfg.Apple.Account.Email)
+	if cfg.Device.Host == "" {
+		tui.Err("bootstrap not completed")
+		tui.Info("run `ipadecrypt bootstrap` first to verify your device")
+		return errors.New("bootstrap not completed")
+	}
+	if target.localPath == "" && cfg.Apple.Account == nil {
+		tui.Err("bootstrap not completed")
+		tui.Info("run `ipadecrypt bootstrap` first to sign in to the App Store")
+		return errors.New("bootstrap not completed")
+	}
+
+	var as *appstore.Client
+	if target.localPath == "" {
+		as, err = appstore.New(filepath.Join(paths.Root, "cookies"))
+		if err != nil {
+			tui.Err("appstore client: %v", err)
+			return err
+		}
+		tui.OK("signed in as %s", cfg.Apple.Account.Email)
+	} else {
+		tui.OK("local IPA %s", filepath.Base(target.localPath))
+	}
 
 	// --- connect ---
 	live := tui.NewLive()
@@ -61,31 +115,53 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 	}
 	live.OK("%s@%s iOS %s %s", cfg.Device.User, cfg.Device.Host, probe.IOSVersion, probe.Arch)
 
-	// --- lookup ---
-	live = tui.NewLive()
-	live.Spin("resolving %s", appRef)
-	app, err := as.Lookup(*cfg.Apple.Account, appRef)
-	if err != nil {
-		live.Fail("lookup failed")
-		tui.Err("lookup: %v", err)
-		return err
+	// --- resolve app metadata ---
+	var (
+		app     appstore.App
+		encPath string
+	)
+
+	if target.localPath != "" {
+		bid, ver, aerr := pipeline.AppInfo(target.localPath)
+		if aerr != nil {
+			tui.Err("read IPA: %v", aerr)
+			return aerr
+		}
+		app.BundleID = bid
+		app.Version = ver
+		encPath = target.localPath
+		tui.OK("%s v%s", app.BundleID, app.Version)
+	} else {
+		live = tui.NewLive()
+		live.Spin("resolving %s", target.lookupID)
+		a, lerr := as.Lookup(*cfg.Apple.Account, target.lookupID)
+		if lerr != nil {
+			live.Fail("lookup failed")
+			tui.Err("lookup: %v", lerr)
+			return lerr
+		}
+		if a.Price > 0 {
+			live.Fail("paid app (price=%v) — unsupported", a.Price)
+			return errors.New("paid apps not supported")
+		}
+		app = a
+		live.OK("%s v%s", app.BundleID, app.Version)
+
+		encPath, err = paths.EncryptedIPA(app.BundleID, app.ID, app.Version)
+		if err != nil {
+			tui.Err("%v", err)
+			return err
+		}
 	}
-	if app.Price > 0 {
-		live.Fail("paid app (price=%v) — unsupported", app.Price)
-		return errors.New("paid apps not supported")
-	}
-	live.OK("%s v%s", app.BundleID, app.Version)
 
 	// --- download (retry on token expiry + auto-purchase on missing license) ---
-	encPath, err := paths.EncryptedIPA(app.BundleID, app.ID, app.Version)
-	if err != nil {
-		tui.Err("%v", err)
-		return err
-	}
-
-	if _, err := os.Stat(encPath); err == nil {
+	_, encStatErr := os.Stat(encPath)
+	switch {
+	case target.localPath != "":
+		// skip download, use user-provided IPA directly
+	case encStatErr == nil:
 		tui.OK("cached %s", filepath.Base(encPath))
-	} else {
+	default:
 		cacheDir, _ := paths.CacheDir()
 		live = tui.NewLive()
 		live.Spin("downloading IPA")
