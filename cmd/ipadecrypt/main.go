@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -26,6 +27,9 @@ var (
 	decryptKeepMetadata bool
 	decryptNoVerify     bool
 	decryptKeepWatch    bool
+
+	versionsShowAll     bool
+	versionsFindVersion string
 )
 
 func main() {
@@ -60,9 +64,30 @@ func main() {
 	decrypt.Flags().BoolVar(&decryptNoVerify, "no-verify", false, "skip the post-decrypt cryptid==0 check on every Mach-O")
 	decrypt.Flags().BoolVar(&decryptKeepWatch, "keep-watch", false, "keep the Watch/ directory (watchOS binaries that remain encrypted)")
 
-	root.AddCommand(bootstrap, decrypt)
+	versions := &cobra.Command{
+		Use:   "versions [bundle-id]",
+		Short: "List cached App Store versions and their numeric external version IDs",
+		Args:  cobra.MaximumNArgs(1),
+		RunE:  versionsHandler,
+	}
+	versions.Flags().BoolVar(&versionsShowAll, "all", false, "show all historical version IDs (default: last 30)")
+	versions.Flags().StringVar(&versionsFindVersion, "find-version", "", "search for a specific version string and return its numeric ID (e.g. --find-version 26.5.0)")
+
+	root.AddCommand(bootstrap, decrypt, versions)
 
 	if err := root.Execute(); err != nil {
+		// If the first non-flag arg is not a known subcommand, hint the user.
+		knownCmds := map[string]bool{"bootstrap": true, "decrypt": true, "versions": true, "help": true, "completion": true}
+		args := os.Args[1:]
+		for _, a := range args {
+			if strings.HasPrefix(a, "-") {
+				continue
+			}
+			if !knownCmds[a] {
+				fmt.Fprintf(os.Stderr, "error: unknown command %q\n\nDid you mean:\n  ipadecrypt decrypt %s\n", a, strings.Join(args, " "))
+			}
+			break
+		}
 		os.Exit(1)
 	}
 }
