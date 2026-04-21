@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 
@@ -84,6 +85,14 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 		return errors.New("paid apps not supported")
 	}
 	live.OK("%s v%s", app.BundleID, app.Version)
+	if decryptExtVerID != "" {
+		if _, parseErr := strconv.ParseInt(decryptExtVerID, 10, 64); parseErr != nil {
+			tui.Err("--external-version-id must be a numeric App Store version ID (e.g. 878109030), not a version string")
+			tui.Info("use `ipadecrypt versions %s` to list available version IDs", appRef)
+			return errors.New("invalid --external-version-id: must be numeric")
+		}
+		tui.Info("pinning to external version ID %s (latest is v%s)", decryptExtVerID, app.Version)
+	}
 
 	// --- download (retry on token expiry + auto-purchase on missing license) ---
 	encPath, err := paths.EncryptedIPA(app.BundleID, app.ID, app.Version)
@@ -92,7 +101,10 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if _, err := os.Stat(encPath); err == nil {
+	// When pinning to a specific external version we don't know the real version
+	// string until the download response arrives, so skip the lookup-based cache
+	// check and let the download determine the final path.
+	if _, err := os.Stat(encPath); err == nil && decryptExtVerID == "" {
 		tui.OK("cached %s", filepath.Base(encPath))
 	} else {
 		cacheDir, _ := paths.CacheDir()
@@ -115,27 +127,28 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 		}
 
 		downloaded := false
+		var lastDownloadErr error
 		for tries := 0; tries < 3 && !downloaded; tries++ {
 			out, err := as.Download(*cfg.Apple.Account, app, cacheDir, decryptExtVerID)
 			switch {
 			case err == nil:
-				if out.DestinationPath != encPath {
-					if rerr := os.Rename(out.DestinationPath, encPath); rerr != nil {
-						live.Fail("rename cache failed")
-						tui.Err("rename cache: %v", rerr)
-						return rerr
-					}
-				}
+				// Use the path the download resolved (may differ from encPath when
+				// --external-version-id pins to a version other than the latest).
+				encPath = out.DestinationPath
 				live.OK("downloaded %s", filepath.Base(encPath))
 				downloaded = true
 
 			case errors.Is(err, appstore.ErrPasswordTokenExpired):
+				lastDownloadErr = err
+				live.Note("attempt %d: token expired, re-authenticating", tries+1)
 				if rerr := reauth(); rerr != nil {
 					return rerr
 				}
 				live.Spin("retrying download")
 
 			case errors.Is(err, appstore.ErrLicenseRequired):
+				lastDownloadErr = err
+				live.Note("attempt %d: license required, acquiring", tries+1)
 				live.Spin("acquiring license")
 				perr := as.Purchase(*cfg.Apple.Account, app)
 				if errors.Is(perr, appstore.ErrPasswordTokenExpired) {
@@ -160,7 +173,22 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 
 		if !downloaded {
 			live.Fail("exhausted retries")
+			if lastDownloadErr != nil {
+				tui.Err("last error: %v", lastDownloadErr)
+			}
+			tui.Info("note: --external-version-id expects a numeric App Store version ID, not a version string")
 			return errors.New("download: exhausted retries")
+		}
+	}
+
+	// Extract the real version string from the cache filename
+	// (format: bundleID_trackID_version.ipa). When --external-version-id is used
+	// the downloaded version may differ from the App Store lookup version.
+	resolvedVersion := app.Version
+	if base := filepath.Base(encPath); strings.HasSuffix(base, ".ipa") {
+		parts := strings.SplitN(strings.TrimSuffix(base, ".ipa"), "_", 3)
+		if len(parts) == 3 {
+			resolvedVersion = parts[2]
 		}
 	}
 
@@ -254,7 +282,7 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 	// --- decrypt via helper ---
 	outRemote := filepath.ToSlash(
 		filepath.Join(device.RemoteRoot, "work",
-			fmt.Sprintf("%s_%s.ipa", app.BundleID, app.Version)))
+			fmt.Sprintf("%s_%s.ipa", app.BundleID, resolvedVersion)))
 
 	if err := dev.Mkdir(filepath.Dir(outRemote)); err != nil {
 		tui.Err("mkdir work: %v", err)
@@ -349,7 +377,7 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 
 	// --- pull + post-process ---
 	cwd, _ := os.Getwd()
-	outLocal := filepath.Join(cwd, fmt.Sprintf("%s_%s.decrypted.ipa", app.BundleID, app.Version))
+	outLocal := filepath.Join(cwd, fmt.Sprintf("%s_%s.decrypted.ipa", app.BundleID, resolvedVersion))
 
 	live = tui.NewLive()
 	live.Spin("downloading → %s", filepath.Base(outLocal))

@@ -34,6 +34,153 @@ type downloadResult struct {
 // Download fetches the IPA for app, writes it to outPath (directory or full
 // file path), injects iTunesMetadata.plist and replicates sinfs.
 //
+
+// PeekVersion queries the App Store download endpoint for the given
+// externalVersionID and returns the version string from the response metadata
+// without downloading the IPA binary. Returns ("", ErrLicenseRequired) if the
+// account has no license, or other errors on failure.
+func (c *Client) PeekVersion(acc Account, app App, externalVersionID string) (string, error) {
+	g, err := guid()
+	if err != nil {
+		return "", err
+	}
+
+	podPrefix := ""
+	if acc.Pod != "" {
+		podPrefix = "p" + acc.Pod + "-"
+	}
+
+	url := fmt.Sprintf("https://%s%s%s?guid=%s", podPrefix, storeDomain, downloadPath, g)
+
+	payload := map[string]any{
+		"creditDisplay":      "",
+		"guid":               g,
+		"salableAdamId":      app.ID,
+		"externalVersionId":  externalVersionID,
+	}
+
+	body, err := plistBody(payload)
+	if err != nil {
+		return "", err
+	}
+
+	headers := map[string]string{
+		"Content-Type": "application/x-apple-plist",
+		"iCloud-DSID":  acc.DirectoryServicesID,
+		"X-Dsid":       acc.DirectoryServicesID,
+	}
+
+	var out downloadResult
+	if _, err := c.send(http.MethodPost, url, headers, body, formatXML, &out); err != nil {
+		return "", fmt.Errorf("peek: %w", err)
+	}
+
+	switch {
+	case out.FailureType == failurePasswordTokenExpired,
+		out.FailureType == failureSignInRequired,
+		out.FailureType == failureDeviceVerificationFailed,
+		out.FailureType == failureLicenseAlreadyExists:
+		return "", ErrPasswordTokenExpired
+	case out.FailureType == failureLicenseNotFound:
+		return "", ErrLicenseRequired
+	case out.FailureType != "" && out.CustomerMessage != "":
+		return "", errors.New(out.CustomerMessage)
+	case out.FailureType != "":
+		return "", fmt.Errorf("peek: %s", out.FailureType)
+	case len(out.Items) == 0:
+		return "", errors.New("peek: empty songList")
+	}
+
+	if v, ok := out.Items[0].Metadata["bundleShortVersionString"]; ok {
+		return fmt.Sprintf("%v", v), nil
+	}
+	return "unknown", nil
+}
+// FetchVersionIDs queries the App Store download endpoint for app and returns
+// the current external version ID string and the full slice of all historical
+// version IDs, without downloading the IPA binary.
+// On ErrPasswordTokenExpired the caller must re-Login and retry.
+// On ErrLicenseRequired the caller must Purchase and retry.
+func (c *Client) FetchVersionIDs(acc Account, app App) (string, []uint64, error) {
+	g, err := guid()
+	if err != nil {
+		return "", nil, err
+	}
+
+	podPrefix := ""
+	if acc.Pod != "" {
+		podPrefix = "p" + acc.Pod + "-"
+	}
+
+	url := fmt.Sprintf("https://%s%s%s?guid=%s", podPrefix, storeDomain, downloadPath, g)
+
+	payload := map[string]any{
+		"creditDisplay": "",
+		"guid":          g,
+		"salableAdamId": app.ID,
+	}
+
+	body, err := plistBody(payload)
+	if err != nil {
+		return "", nil, err
+	}
+
+	headers := map[string]string{
+		"Content-Type": "application/x-apple-plist",
+		"iCloud-DSID":  acc.DirectoryServicesID,
+		"X-Dsid":       acc.DirectoryServicesID,
+	}
+
+	var out downloadResult
+	if _, err := c.send(http.MethodPost, url, headers, body, formatXML, &out); err != nil {
+		return "", nil, fmt.Errorf("fetch version IDs: %w", err)
+	}
+
+	switch {
+	case out.FailureType == failurePasswordTokenExpired,
+		out.FailureType == failureSignInRequired,
+		out.FailureType == failureDeviceVerificationFailed,
+		out.FailureType == failureLicenseAlreadyExists:
+		return "", nil, ErrPasswordTokenExpired
+	case out.FailureType == failureLicenseNotFound:
+		return "", nil, ErrLicenseRequired
+	case out.FailureType != "" && out.CustomerMessage != "":
+		return "", nil, errors.New(out.CustomerMessage)
+	case out.FailureType != "":
+		return "", nil, fmt.Errorf("fetch version IDs: %s", out.FailureType)
+	case len(out.Items) == 0:
+		return "", nil, errors.New("fetch version IDs: empty songList")
+	}
+
+	meta := out.Items[0].Metadata
+
+	var currentID string
+	if v, ok := meta["softwareVersionExternalIdentifier"]; ok {
+		currentID = fmt.Sprintf("%v", v)
+	}
+
+	var allIDs []uint64
+	if v, ok := meta["softwareVersionExternalIdentifiers"]; ok {
+		switch ids := v.(type) {
+		case []interface{}:
+			for _, id := range ids {
+				switch n := id.(type) {
+				case uint64:
+					allIDs = append(allIDs, n)
+				case int64:
+					allIDs = append(allIDs, uint64(n))
+				case float64:
+					allIDs = append(allIDs, uint64(n))
+				}
+			}
+		case []uint64:
+			allIDs = ids
+		}
+	}
+
+	return currentID, allIDs, nil
+}
+
 // On ErrPasswordTokenExpired the caller must re-Login and retry.
 // On ErrLicenseRequired the caller must Purchase and retry.
 func (c *Client) Download(acc Account, app App, outPath, externalVersionID string) (DownloadOutput, error) {
