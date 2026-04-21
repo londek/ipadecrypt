@@ -23,7 +23,6 @@ var (
 	decryptExtVerID     string
 	decryptUninstall    bool
 	decryptNoCleanup    bool
-	decryptProbeDevice  bool
 	decryptKeepMetadata bool
 	decryptNoVerify     bool
 	decryptKeepWatch    bool
@@ -57,7 +56,6 @@ func main() {
 	decrypt.Flags().StringVar(&decryptExtVerID, "external-version-id", "", "pin to a specific historical App Store version")
 	decrypt.Flags().BoolVar(&decryptUninstall, "uninstall", false, "uninstall the app on device after decrypt")
 	decrypt.Flags().BoolVar(&decryptNoCleanup, "no-cleanup", false, "leave remote staging files in place")
-	decrypt.Flags().BoolVar(&decryptProbeDevice, "probe-device", false, "re-probe device iOS version & arch")
 	decrypt.Flags().BoolVar(&decryptKeepMetadata, "keep-metadata", false, "keep iTunesMetadata.plist (Apple ID + purchase info) in the output IPA")
 	decrypt.Flags().BoolVar(&decryptNoVerify, "no-verify", false, "skip the post-decrypt cryptid==0 check on every Mach-O")
 	decrypt.Flags().BoolVar(&decryptKeepWatch, "keep-watch", false, "keep the Watch/ directory (watchOS binaries that remain encrypted)")

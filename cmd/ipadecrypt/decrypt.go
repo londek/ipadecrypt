@@ -39,7 +39,7 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	tui.OK("signed in as %s", "#######@gmail.com")
+	tui.OK("signed in as %s", cfg.Apple.Account.Email)
 
 	// --- connect ---
 	live := tui.NewLive()
@@ -52,23 +52,14 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 	}
 	defer dev.Close()
 
-	if decryptProbeDevice || cfg.Device.IOSVersion == "" || cfg.Device.Arch == "" {
-		live.Spin("probing device")
-		pr, err := dev.Probe()
-		if err != nil {
-			live.Fail("probe failed")
-			tui.Err("probe device: %v", err)
-			return err
-		}
-		cfg.Device.IOSVersion = pr.IOSVersion
-		cfg.Device.Arch = pr.Arch
-		cfg.Device.Model = pr.Model
-		if err := cfg.Save(); err != nil {
-			live.Fail("save probe: %v", err)
-			return err
-		}
+	live.Spin("probing device")
+	probe, err := dev.Probe()
+	if err != nil {
+		live.Fail("probe failed")
+		tui.Err("probe device: %v", err)
+		return err
 	}
-	live.OK("%s@%s iOS %s %s", cfg.Device.User, cfg.Device.Host, cfg.Device.IOSVersion, cfg.Device.Arch)
+	live.OK("%s@%s iOS %s %s", cfg.Device.User, cfg.Device.Host, probe.IOSVersion, probe.Arch)
 
 	// --- lookup ---
 	live = tui.NewLive()
@@ -171,8 +162,8 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 		strings.TrimSuffix(filepath.Base(encPath), ".ipa")+"-minos.tmp.ipa")
 
 	live = tui.NewLive()
-	live.Spin("patching Info.plist for MinimumOSVersion %s", cfg.Device.IOSVersion)
-	changed, previous, err := pipeline.PatchMinOS(encPath, tmp, cfg.Device.IOSVersion)
+	live.Spin("patching Info.plist for MinimumOSVersion %s", probe.IOSVersion)
+	changed, previous, err := pipeline.PatchMinOS(encPath, tmp, probe.IOSVersion)
 	if err != nil {
 		live.Fail("patch MinOS failed")
 		_ = os.Remove(tmp)
@@ -182,7 +173,7 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 	if changed {
 		uploadPath = tmp
 		patchedPath = tmp
-		live.OK("MinimumOSVersion %s → %s", previous, cfg.Device.IOSVersion)
+		live.OK("MinimumOSVersion %s → %s", previous, probe.IOSVersion)
 	} else {
 		_ = os.Remove(tmp)
 		live.OK("no MinOS change needed")
@@ -416,14 +407,10 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 		_ = dev.Remove(stagingRemote)
 		_ = dev.Remove(outRemote)
 
-		if cfg.Options.UninstallAfterDecrypt || decryptUninstall {
+		if decryptUninstall {
 			if err := dev.Uninstall(appinst, app.BundleID); err != nil {
 				tui.Warn("uninstall: %v", err)
 			}
-		}
-
-		if !cfg.Options.KeepEncryptedIPA {
-			_ = os.Remove(encPath)
 		}
 	}
 

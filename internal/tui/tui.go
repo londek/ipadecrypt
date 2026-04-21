@@ -182,6 +182,85 @@ func PromptPassword(label string) (string, error) {
 	return string(pw), nil
 }
 
+// Select renders an arrow-key-navigable list and returns the chosen index.
+// Enter confirms, Ctrl-C aborts. Falls back to the first option when stdin
+// isn't a TTY.
+func Select(label string, options []string) (int, error) {
+	if len(options) == 0 {
+		return -1, fmt.Errorf("select: no options")
+	}
+	fd := int(os.Stdin.Fd())
+	if !term.IsTerminal(fd) {
+		return 0, nil
+	}
+
+	old, err := term.MakeRaw(fd)
+	if err != nil {
+		return -1, err
+	}
+	defer term.Restore(fd, old)
+
+	cursor := 0
+	draw := func(first bool) {
+		if !first {
+			fmt.Fprintf(Out, "\x1b[%dA", len(options)+1)
+		}
+		fmt.Fprint(Out, "\r\x1b[K  "+paint(ansiCyan, "▸")+" "+label+"\r\n")
+		for i, opt := range options {
+			fmt.Fprint(Out, "\r\x1b[K")
+			if i == cursor {
+				fmt.Fprint(Out, "    "+paint(ansiCyan, "›")+" "+paint(ansiBold, opt))
+			} else {
+				fmt.Fprint(Out, "      "+paint(ansiDim, opt))
+			}
+			fmt.Fprint(Out, "\r\n")
+		}
+	}
+
+	draw(true)
+
+	buf := make([]byte, 3)
+	for {
+		n, err := os.Stdin.Read(buf)
+		if err != nil {
+			return -1, err
+		}
+		if n == 0 {
+			continue
+		}
+		switch {
+		case buf[0] == '\r' || buf[0] == '\n':
+			return cursor, nil
+		case buf[0] == 0x03: // Ctrl-C
+			return -1, fmt.Errorf("aborted")
+		case buf[0] == 0x04: // Ctrl-D
+			return -1, io.EOF
+		case n == 3 && buf[0] == 0x1b && buf[1] == '[':
+			switch buf[2] {
+			case 'A': // up
+				if cursor > 0 {
+					cursor--
+				}
+			case 'B': // down
+				if cursor < len(options)-1 {
+					cursor++
+				}
+			}
+			draw(false)
+		case buf[0] == 'k':
+			if cursor > 0 {
+				cursor--
+				draw(false)
+			}
+		case buf[0] == 'j':
+			if cursor < len(options)-1 {
+				cursor++
+				draw(false)
+			}
+		}
+	}
+}
+
 // PressEnter prints a dim message and waits for the user to hit Enter.
 func PressEnter(msg string) error {
 	fmt.Fprint(Out, "  "+paint(ansiCyan, "▸")+" "+paint(ansiDim, msg+" (press Enter)")+" ")
