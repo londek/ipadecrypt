@@ -26,7 +26,7 @@ var (
 
 // send makes an HTTP request, persists cookies, and decodes the response into
 // out (when non-nil) per format. The returned *http.Response has an already-
-// drained body — callers inspect StatusCode/Header only.
+// drained body - callers inspect StatusCode/Header only.
 func (c *Client) send(method, url string, headers map[string]string, body []byte, format responseFormat, out any) (*http.Response, error) {
 	var r io.Reader
 	if len(body) > 0 {

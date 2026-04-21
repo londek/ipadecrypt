@@ -141,7 +141,7 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 			return lerr
 		}
 		if a.Price > 0 {
-			live.Fail("paid app (price=%v) — unsupported", a.Price)
+			live.Fail("paid app (price=%v) - unsupported", a.Price)
 			return errors.New("paid apps not supported")
 		}
 		app = a
@@ -273,8 +273,9 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 		tui.Err("locate appinst: %v", err)
 		return err
 	}
+
 	if appinst == "" {
-		tui.Err("appinst (AppSync Unified) not found on device — run `ipadecrypt bootstrap`")
+		tui.Err("appinst not found on device - run `ipadecrypt bootstrap`")
 		return errors.New("appinst not found")
 	}
 
@@ -315,7 +316,39 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 		}
 		live.OK("installed → %s", bundlePath)
 	} else {
-		tui.OK("already installed → %s", bundlePath)
+		// Something's already installed at the expected bundle name - but
+		// that could be a different version or something our tooling (or
+		// the user) tampered with. Verify the main executable's SHA-256
+		// matches the IPA we'd otherwise upload before trusting it.
+		live = tui.NewLive()
+		live.Spin("verifying installed bundle matches IPA")
+
+		execName, wantSum, herr := pipeline.MainExecSHA256(uploadPath)
+		if herr != nil {
+			live.Fail("hash IPA failed")
+			tui.Err("hash ipa: %v", herr)
+			return herr
+		}
+
+		remoteExec := filepath.ToSlash(filepath.Join(bundlePath, execName))
+
+		gotSum, herr := dev.HashFile(helperPath, remoteExec)
+		if herr != nil {
+			live.Fail("hash device failed")
+			tui.Err("hash device: %v", herr)
+
+			return herr
+		}
+
+		if gotSum != wantSum {
+			live.Fail("installed bundle differs from IPA")
+			tui.Err("sha256 mismatch: IPA=%s device=%s", wantSum[:12]+"…", gotSum[:12]+"…")
+			tui.Info("uninstall the app on the device (or delete %s) and re-run", bundlePath)
+
+			return errors.New("installed bundle sha256 mismatch")
+		}
+
+		live.OK("already installed → %s", bundlePath)
 	}
 
 	// --- decrypt via helper ---
@@ -361,7 +394,7 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 			case "resuming":
 				live.Spin("letting dyld map frameworks")
 			case "crashed":
-				live.Note("dyld crashed on a missing iOS symbol — frameworks mapped, proceeding")
+				live.Note("dyld crashed on a missing iOS symbol - frameworks mapped, proceeding")
 			}
 		case "plan":
 			var n int64

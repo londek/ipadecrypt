@@ -124,7 +124,7 @@ func notifyContext() (context.Context, context.CancelFunc) {
 
 		fmt.Fprint(os.Stderr, "\r\033[2K\033[0m")
 
-		tui.Warn("interrupted — cleaning up")
+		tui.Warn("interrupted - cleaning up")
 
 		cancel()
 

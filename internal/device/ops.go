@@ -174,6 +174,24 @@ func (c *Client) EnsureHelper() (string, error) {
 	return remote, nil
 }
 
+// HashFile runs `<helperPath> sha256 <path>` under sudo (installed bundles
+// under /var/containers are readable only by root + _installd). Returns the
+// lowercase-hex digest or an error.
+func (c *Client) HashFile(helperPath, path string) (string, error) {
+	cmd := fmt.Sprintf("%s sha256 %q", helperPath, path)
+
+	out, errOut, code, err := c.RunSudo(cmd)
+	if err != nil {
+		return "", fmt.Errorf("helper sha256: %w", err)
+	}
+
+	if code != 0 {
+		return "", fmt.Errorf("helper sha256 exit %d: %s", code, strings.TrimSpace(errOut))
+	}
+
+	return strings.TrimSpace(out), nil
+}
+
 func (c *Client) FindInstalled(helperPath, appDirName string) (string, error) {
 	cmd := fmt.Sprintf("%s find %q", helperPath, appDirName)
 	out, errOut, code, err := c.RunSudo(cmd)

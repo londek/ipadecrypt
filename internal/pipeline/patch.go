@@ -3,6 +3,8 @@ package pipeline
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -131,6 +133,77 @@ func writeBytes(f *zip.File, w *zip.Writer, data []byte) error {
 	_, err = io.Copy(dst, bytes.NewReader(data))
 
 	return err
+}
+
+// MainExecSHA256 reads the main executable out of the IPA (resolved via
+// CFBundleExecutable in the top-level Info.plist) and returns its name and
+// lowercase-hex SHA-256. Used to verify that an already-installed bundle on
+// the device still matches the IPA we'd otherwise upload.
+func MainExecSHA256(ipaPath string) (execName, hexSum string, err error) {
+	r, err := zip.OpenReader(ipaPath)
+	if err != nil {
+		return "", "", fmt.Errorf("open %s: %w", ipaPath, err)
+	}
+	defer r.Close()
+
+	var appDir string
+
+	for _, f := range r.File {
+		if !isMainAppInfoPlist(f.Name) {
+			continue
+		}
+
+		rc, err := f.Open()
+		if err != nil {
+			return "", "", err
+		}
+
+		data, err := io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			return "", "", err
+		}
+
+		var m map[string]any
+		if _, err := plist.Unmarshal(data, &m); err != nil {
+			return "", "", fmt.Errorf("parse Info.plist: %w", err)
+		}
+
+		execName, _ = m["CFBundleExecutable"].(string)
+		parts := strings.SplitN(f.Name, "/", 3)
+		appDir = parts[0] + "/" + parts[1]
+
+		break
+	}
+
+	if execName == "" {
+		return "", "", fmt.Errorf("CFBundleExecutable not found in %s", ipaPath)
+	}
+
+	execPath := appDir + "/" + execName
+
+	for _, f := range r.File {
+		if f.Name != execPath {
+			continue
+		}
+
+		rc, err := f.Open()
+		if err != nil {
+			return "", "", err
+		}
+
+		h := sha256.New()
+		if _, err := io.Copy(h, rc); err != nil {
+			rc.Close()
+			return "", "", err
+		}
+
+		rc.Close()
+
+		return execName, hex.EncodeToString(h.Sum(nil)), nil
+	}
+
+	return "", "", fmt.Errorf("main exec %s not found in IPA", execPath)
 }
 
 // AppInfo reads BundleID + version from Payload/<Name>.app/Info.plist.

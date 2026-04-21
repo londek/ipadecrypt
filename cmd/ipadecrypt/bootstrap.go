@@ -72,7 +72,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) error {
 		switch {
 		case errors.Is(lerr, appstore.ErrAuthCodeRequired):
 			live.Stop()
-			code, perr := tui.Prompt("Apple sent a 6-digit code — enter it")
+			code, perr := tui.Prompt("Apple sent a 6-digit code - enter it")
 			if perr != nil {
 				return perr
 			}
@@ -257,10 +257,10 @@ func bootstrapHandler(cmd *cobra.Command, args []string) error {
 				p, err := c.probe()
 				switch {
 				case err != nil:
-					tui.Err("%s — %v", c.name, err)
+					tui.Err("%s - %v", c.name, err)
 					missing++
 				case p == "":
-					tui.Err("%s — not found", c.name)
+					tui.Err("%s - not found", c.name)
 					missing++
 				default:
 					tui.OK("%s → %s", c.name, p)
@@ -284,7 +284,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) error {
 		if connErr != nil {
 			prompt = "press Enter to retry"
 		} else {
-			prompt = fmt.Sprintf("%d missing — press Enter to retry", missing)
+			prompt = fmt.Sprintf("%d missing - press Enter to retry", missing)
 		}
 	}
 
@@ -319,7 +319,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) error {
 	live.OK("helper ready at %s", helperPath)
 
 	tui.Spacer()
-	tui.OK("bootstrap complete — run `ipadecrypt decrypt <bundle-id>` to decrypt an app")
+	tui.OK("bootstrap complete - run `ipadecrypt decrypt <bundle-id>` to decrypt an app")
 
 	return nil
 }

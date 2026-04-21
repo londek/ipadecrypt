@@ -36,6 +36,7 @@
 #include <mach/vm_region.h>
 #include <mach/exception_types.h>
 #include <mach/thread_status.h>
+#include <CommonCrypto/CommonDigest.h>
 
 // mach_vm.h is marked "unsupported" in the iOS SDK but the syscalls exist at
 // runtime. Forward-declare the ones we use, matching the declarations in
@@ -110,6 +111,38 @@ static int find_app_dir(const char *app_dir_name) {
                 scanned, root, app_dir_name);
     }
     return rc;
+}
+
+// ----- sha256 subcommand -----------------------------------------------
+
+// sha256_file streams `path` through CommonCrypto's SHA-256 and prints the
+// digest as lowercase hex on stdout. Used to cheaply verify that an already-
+// installed bundle still matches the IPA we were going to upload.
+static int sha256_file(const char *path) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        fprintf(stderr, "[helper] open %s: %s\n", path, strerror(errno));
+        return 1;
+    }
+    CC_SHA256_CTX ctx;
+    CC_SHA256_Init(&ctx);
+    uint8_t buf[65536];
+    for (;;) {
+        ssize_t n = read(fd, buf, sizeof(buf));
+        if (n == 0) break;
+        if (n < 0) {
+            fprintf(stderr, "[helper] read %s: %s\n", path, strerror(errno));
+            close(fd);
+            return 1;
+        }
+        CC_SHA256_Update(&ctx, buf, (CC_LONG)n);
+    }
+    close(fd);
+    uint8_t digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256_Final(digest, &ctx);
+    for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; i++) printf("%02x", digest[i]);
+    printf("\n");
+    return 0;
 }
 
 // ----- Mach-O / encryption-info parsing on local files -----------------
@@ -897,6 +930,13 @@ int main(int argc, char **argv) {
         }
         return find_app_dir(argv[2]);
     }
+    if (argc >= 2 && strcmp(argv[1], "sha256") == 0) {
+        if (argc != 3) {
+            fprintf(stderr, "usage: %s sha256 <path>\n", argv[0]);
+            return 2;
+        }
+        return sha256_file(argv[2]);
+    }
 
     // Flags: -v (human verbose) and -e (machine @evt events) are independent.
     while (argc > 1 && argv[1][0] == '-' && argv[1][1] != 0) {
@@ -965,7 +1005,7 @@ int main(int argc, char **argv) {
     //
     // PlugIns/ is the classic NSExtension location; Extensions/ is used by
     // iOS 18+ ExtensionKit (e.g. YouTube's AppMigrationExtension). Both must
-    // be scanned — skipping one leaves encrypted binaries in the output IPA.
+    // be scanned - skipping one leaves encrypted binaries in the output IPA.
     //
     // Note we only look at the main app's PlugIns/ and Extensions/, not any
     // nested appex inside Watch/ - those are watchOS binaries, can't execute

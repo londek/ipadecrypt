@@ -1,5 +1,5 @@
-// Package tui is the single-stop terminal UI for ipadecrypt. Everything — status
-// lines, prompts, spinners, progress bars, result blocks — writes to Out
+// Package tui is the single-stop terminal UI for ipadecrypt. Everything - status
+// lines, prompts, spinners, progress bars, result blocks - writes to Out
 // (stderr by default) so that stdout is reserved for data (e.g. the final
 // decrypted IPA path).
 package tui
