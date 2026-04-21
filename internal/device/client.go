@@ -29,11 +29,14 @@ type Client struct {
 }
 
 func Connect(ctx context.Context, dev config.Device) (*Client, error) {
+	auth, err := sshAuthMethods(dev.Auth)
+	if err != nil {
+		return nil, err
+	}
+
 	cfg := &ssh.ClientConfig{
-		User: dev.User,
-		Auth: []ssh.AuthMethod{
-			ssh.Password(dev.Auth.Password),
-		},
+		User:            dev.User,
+		Auth:            auth,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         15 * time.Second,
 	}
@@ -59,6 +62,42 @@ func Connect(ctx context.Context, dev config.Device) (*Client, error) {
 	}
 
 	return &Client{cfg: dev, ssh: sshClient, sftp: sftpClient}, nil
+}
+
+func sshAuthMethods(a config.DeviceAuth) ([]ssh.AuthMethod, error) {
+	if a.Kind == "key" {
+		path, err := expandUser(a.KeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("expand key path: %w", err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read key %s: %w", path, err)
+		}
+		var signer ssh.Signer
+		if a.KeyPassphrase != "" {
+			signer, err = ssh.ParsePrivateKeyWithPassphrase(data, []byte(a.KeyPassphrase))
+		} else {
+			signer, err = ssh.ParsePrivateKey(data)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("parse key %s: %w", path, err)
+		}
+		return []ssh.AuthMethod{ssh.PublicKeys(signer)}, nil
+	}
+
+	return []ssh.AuthMethod{ssh.Password(a.Password)}, nil
+}
+
+func expandUser(path string) (string, error) {
+	if !strings.HasPrefix(path, "~") {
+		return path, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, strings.TrimPrefix(path, "~")), nil
 }
 
 func (c *Client) Close() {

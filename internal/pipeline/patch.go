@@ -32,6 +32,7 @@ func PatchMinOS(src, dst, target string) (bool, string, error) {
 	defer out.Close()
 
 	w := zip.NewWriter(out)
+
 	defer w.Close()
 
 	patched := false
@@ -75,12 +76,14 @@ func copyEntry(f *zip.File, w *zip.Writer) error {
 	defer rc.Close()
 
 	hdr := f.FileHeader
+
 	dst, err := w.CreateHeader(&hdr)
 	if err != nil {
 		return err
 	}
 
 	_, err = io.Copy(dst, rc)
+
 	return err
 }
 
@@ -119,12 +122,61 @@ func rewriteInfoPlist(f *zip.File, target string, w *zip.Writer) (bool, string, 
 
 func writeBytes(f *zip.File, w *zip.Writer, data []byte) error {
 	hdr := f.FileHeader
+
 	dst, err := w.CreateHeader(&hdr)
 	if err != nil {
 		return err
 	}
+
 	_, err = io.Copy(dst, bytes.NewReader(data))
+
 	return err
+}
+
+// AppInfo reads BundleID + version from Payload/<Name>.app/Info.plist.
+func AppInfo(ipaPath string) (bundleID, version string, err error) {
+	r, err := zip.OpenReader(ipaPath)
+	if err != nil {
+		return "", "", fmt.Errorf("open %s: %w", ipaPath, err)
+	}
+
+	defer r.Close()
+
+	for _, f := range r.File {
+		if !isMainAppInfoPlist(f.Name) {
+			continue
+		}
+
+		rc, err := f.Open()
+		if err != nil {
+			return "", "", err
+		}
+
+		data, err := io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			return "", "", err
+		}
+
+		var m map[string]any
+		if _, err := plist.Unmarshal(data, &m); err != nil {
+			return "", "", fmt.Errorf("parse Info.plist: %w", err)
+		}
+
+		version, _ = m["CFBundleShortVersionString"].(string)
+		if version == "" {
+			version, _ = m["CFBundleVersion"].(string)
+		}
+
+		bundleID, _ = m["CFBundleIdentifier"].(string)
+		if bundleID == "" {
+			return "", "", fmt.Errorf("Info.plist missing CFBundleIdentifier")
+		}
+
+		return bundleID, version, nil
+	}
+
+	return "", "", fmt.Errorf("no Payload/*.app/Info.plist in %s", ipaPath)
 }
 
 func AppDirName(ipaPath string) (string, error) {

@@ -1,26 +1,20 @@
 <div align="center">
 
-# ipadecrypt
+<img src="https://readme-typing-svg.herokuapp.com?font=Inter&weight=700&size=36&color=FFFFFF&center=true&vCenter=true&width=300&lines=ipadecrypt&repeat=false&duration=1500" alt="ipadecrypt">
 
 **End-to-end FairPlay decrypter for App Store apps.**
 *Give it a bundle ID, get a decrypted `.ipa`. And yes - it happily decrypts iOS 26 apps.*
 
-[![Go Version](https://img.shields.io/badge/Go-1.24%2B-00ADD8?style=flat-square&logo=go)](https://golang.org/)
-[![Platform](https://img.shields.io/badge/platform-macOS-000?style=flat-square&logo=apple)](https://www.apple.com/macos/)
-[![iOS](https://img.shields.io/badge/iOS-14--26-007AFF?style=flat-square&logo=ios)](https://www.apple.com/ios/)
+[![Go Version](https://img.shields.io/badge/Go-1.25%2B-00ADD8?style=flat-square&logo=go)](https://golang.org/)
+[![macOS](https://img.shields.io/badge/macOS-000?style=flat-square&logo=apple&logoColor=white)](#install)
+[![Linux](https://img.shields.io/badge/Linux-000?style=flat-square&logo=linux&logoColor=white)](#install)
+[![Windows](https://img.shields.io/badge/Windows-000?style=flat-square&logo=windows&logoColor=white)](#install)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](#license)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square)](https://github.com/londek/ipadecrypt/pulls)
 
-<img width="80%" src="https://github.com/user-attachments/assets/d2f52a62-3f79-4caa-84ba-688741e0ca33" />
+<img width="90%" src="https://github.com/user-attachments/assets/ba8dbd32-a2fb-49cc-afee-3aa88050718e" />
 
 </div>
-
----
-
-```sh
-ipadecrypt bootstrap
-ipadecrypt decrypt com.example.app
-```
 
 ## The trick
 
@@ -28,12 +22,12 @@ You don't have to *run* an encrypted iOS app to decrypt it. After `posix_spawn` 
 
 ## Requirements
 
-### On your Mac
-- macOS (Apple Silicon or Intel)
-- Go 1.24+ for building from source
-- Jailbroken iPhone
+### On your computer
+- macOS, Linux, or Windows - anything that can SSH into the device
+- Go 1.25+ for building from source (prebuilt binaries are on the releases page)
+- Jailbroken iPhone reachable over the network
 
-### On the jailbroken iPhone / iPad
+### On the jailbroken iPhone
 All installable through Sileo:
 
 | Package | Purpose |
@@ -47,11 +41,15 @@ All installable through Sileo:
 
 ## Install
 
+Download a prebuilt binary from the [releases page](https://github.com/londek/ipadecrypt/releases/latest).
+
+Using go install:
+
 ```sh
 go install github.com/londek/ipadecrypt/cmd/ipadecrypt@latest
 ```
 
-Or from source:
+From source (refer to [BUILDING.md](BUILDING.md) for detailed instructions):
 
 ```sh
 git clone https://github.com/londek/ipadecrypt
@@ -77,7 +75,7 @@ A four-step interactive wizard:
 ### Decrypt an app
 
 ```sh
-ipadecrypt decrypt <bundle-id>
+ipadecrypt decrypt <bundle-id|app-store-id|path-to-local-ipa>
 ```
 
 ## License
@@ -94,3 +92,11 @@ MIT.
 ## AI Disclaimer
 
 This project was developed with the assistance of AI tools. While I can't guarantee the accuracy of all AI-generated content, I have overviewed creation process and then reviewed, tested the code to ensure it meets the project's requirements.
+
+<a href="https://www.star-history.com/?repos=londek%2Fipadecrypt&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=londek/ipadecrypt&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=londek/ipadecrypt&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=londek/ipadecrypt&type=date&legend=top-left" />
+ </picture>
+</a>

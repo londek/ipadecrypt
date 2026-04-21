@@ -1,0 +1,61 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: ipadecrypt
+
+before:
+  hooks:
+    - go mod tidy
+    # Rebuild the embedded iOS helper. Requires macOS + Xcode + ldid on the
+    # release runner. Comment out if helper.arm64 is already checked in and
+    # you want to release from Linux/CI without an Xcode toolchain.
+    - ./helper/build.sh
+    - cp helper/dist/helper.arm64 internal/device/helper.arm64
+
+builds:
+  - id: ipadecrypt
+    main: ./cmd/ipadecrypt
+    binary: ipadecrypt
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - arm64
+      - amd64
+      - "386"
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+
+archives:
+  - formats: binary
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-dev"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "Merge pull request"
+
+release:
+  github:
+    owner: londek
+    name: ipadecrypt
+  draft: false
+  prerelease: auto
+  extra_files:
+    - glob: helper/dist/helper.arm64
+      name_template: helper.arm64

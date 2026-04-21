@@ -13,17 +13,16 @@ import (
 const SchemaVersion = 1
 
 type Config struct {
-	Version int     `json:"version"`
-	Apple   Apple   `json:"apple"`
-	Device  Device  `json:"device"`
-	Options Options `json:"options"`
+	Version int    `json:"version"`
+	Apple   Apple  `json:"apple"`
+	Device  Device `json:"device"`
 
 	path string
 }
 
 type Apple struct {
-	Email    string       `json:"email,omitempty"`
-	Password string       `json:"password,omitempty"`
+	Email    string            `json:"email,omitempty"`
+	Password string            `json:"password,omitempty"`
 	Account  *appstore.Account `json:"account,omitempty"`
 }
 
@@ -34,19 +33,13 @@ type Device struct {
 	Auth             DeviceAuth `json:"auth,omitempty"`
 	KnownHostsPath   string     `json:"knownHostsPath,omitempty"`
 	AcceptNewHostKey bool       `json:"acceptNewHostKey,omitempty"`
-	IOSVersion       string     `json:"iosVersion,omitempty"`
-	Arch             string     `json:"arch,omitempty"`
-	Model            string     `json:"model,omitempty"`
 }
 
 type DeviceAuth struct {
-	Kind     string `json:"kind,omitempty"`
-	Password string `json:"password,omitempty"`
-}
-
-type Options struct {
-	UninstallAfterDecrypt bool `json:"uninstallAfterDecrypt"`
-	KeepEncryptedIPA      bool `json:"keepEncryptedIpa"`
+	Kind          string `json:"kind,omitempty"`
+	Password      string `json:"password,omitempty"`
+	KeyPath       string `json:"keyPath,omitempty"`
+	KeyPassphrase string `json:"keyPassphrase,omitempty"`
 }
 
 func New(path string) *Config {

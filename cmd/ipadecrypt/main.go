@@ -24,7 +24,6 @@ var (
 	decryptExtVerID     string
 	decryptUninstall    bool
 	decryptNoCleanup    bool
-	decryptProbeDevice  bool
 	decryptKeepMetadata bool
 	decryptNoVerify     bool
 	decryptKeepWatch    bool
@@ -53,7 +52,7 @@ func main() {
 	bootstrap.Flags().BoolVar(&bootstrapReset, "reset", false, "forget cached credentials and re-prompt")
 
 	decrypt := &cobra.Command{
-		Use:   "decrypt <bundle-id|app-store-id>",
+		Use:   "decrypt <bundle-id|app-store-id|path-to-local-ipa>",
 		Short: "Download, install, decrypt, and retrieve an app by bundle ID or App Store ID",
 		Args:  cobra.ExactArgs(1),
 		RunE:  decryptHandler,
@@ -61,7 +60,6 @@ func main() {
 	decrypt.Flags().StringVar(&decryptExtVerID, "external-version-id", "", "pin to a specific historical App Store version")
 	decrypt.Flags().BoolVar(&decryptUninstall, "uninstall", false, "uninstall the app on device after decrypt")
 	decrypt.Flags().BoolVar(&decryptNoCleanup, "no-cleanup", false, "leave remote staging files in place")
-	decrypt.Flags().BoolVar(&decryptProbeDevice, "probe-device", false, "re-probe device iOS version & arch")
 	decrypt.Flags().BoolVar(&decryptKeepMetadata, "keep-metadata", false, "keep iTunesMetadata.plist (Apple ID + purchase info) in the output IPA")
 	decrypt.Flags().BoolVar(&decryptNoVerify, "no-verify", false, "skip the post-decrypt cryptid==0 check on every Mach-O")
 	decrypt.Flags().BoolVar(&decryptKeepWatch, "keep-watch", false, "keep the Watch/ directory (watchOS binaries that remain encrypted)")

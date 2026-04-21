@@ -2,7 +2,7 @@
 // task_for_pid + mach_vm_read (TrollDecryptJB's technique).
 //
 // Rationale: mremap_encrypted from an arbitrary userland process returns EPERM
-// on iOS 16 — the kernel won't hand over FairPlay keys to a process that
+// on iOS 16 - the kernel won't hand over FairPlay keys to a process that
 // isn't the target app. Running the app itself with POSIX_SPAWN_START_SUSPENDED
 // maps its __TEXT into a task with the right crypto context; a root-privileged
 // observer with task_for_pid can then mach_vm_read those pages and the kernel
@@ -115,7 +115,7 @@ static int find_app_dir(const char *app_dir_name) {
 // ----- Mach-O / encryption-info parsing on local files -----------------
 
 // Info about an encrypted slice within a (thin or fat) Mach-O.
-// We support only thin arm64/arm64e binaries for the spawn path — the kernel
+// We support only thin arm64/arm64e binaries for the spawn path - the kernel
 // will pick the right slice itself when it loads the fat executable, but our
 // in-memory patching below still needs to know which slice it was. For iOS,
 // nearly all app binaries are thin arm64/arm64e.
@@ -744,7 +744,7 @@ static int rm_rf(const char *path) {
 // success or -1 on a fatal failure that should abort the whole run.
 //
 // bundle_src: absolute source bundle path on the installed device (where the
-//             still-encrypted Mach-Os live — kernel will decrypt them lazily
+//             still-encrypted Mach-Os live - kernel will decrypt them lazily
 //             when we mach_vm_read from the spawned task's map).
 // bundle_dst: absolute destination bundle path inside the staging Payload/
 //             tree (where we write the plaintext copies).
@@ -933,7 +933,7 @@ int main(int argc, char **argv) {
     // suspended, so we need its own spawn-and-dump pass.
     //
     // Note we only look at the main app's PlugIns/, not any nested appex
-    // inside Watch/ — those are watchOS binaries, can't execute on iPhone.
+    // inside Watch/ - those are watchOS binaries, can't execute on iPhone.
     char plugins_src[4096];
     snprintf(plugins_src, sizeof(plugins_src), "%s/PlugIns", bundle);
     DIR *pd = opendir(plugins_src);

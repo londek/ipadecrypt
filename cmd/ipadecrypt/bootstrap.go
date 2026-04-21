@@ -130,13 +130,53 @@ func bootstrapHandler(cmd *cobra.Command, args []string) error {
 		cfg.Device.User = u
 	}
 
-	if cfg.Device.Auth.Password == "" {
-		pw, err := tui.PromptPassword("device password (SSH + sudo)")
+	if cfg.Device.Auth.Kind == "" {
+		idx, err := tui.Select("authentication method", []string{
+			"password",
+			"SSH public key",
+		})
 		if err != nil {
 			return err
 		}
-		cfg.Device.Auth.Kind = "password"
-		cfg.Device.Auth.Password = pw
+		if idx == 1 {
+			cfg.Device.Auth.Kind = "key"
+		} else {
+			cfg.Device.Auth.Kind = "password"
+		}
+	}
+
+	switch cfg.Device.Auth.Kind {
+	case "key":
+		if cfg.Device.Auth.KeyPath == "" {
+			p, err := tui.PromptDefault("SSH private key path", "~/.ssh/id_ed25519")
+			if err != nil {
+				return err
+			}
+			cfg.Device.Auth.KeyPath = strings.TrimSpace(p)
+		}
+		if cfg.Device.Auth.KeyPassphrase == "" {
+			pass, err := tui.PromptPassword("key passphrase (leave empty if unencrypted)")
+			if err != nil {
+				return err
+			}
+			cfg.Device.Auth.KeyPassphrase = pass
+		}
+		if cfg.Device.Auth.Password == "" && cfg.Device.User != "root" {
+			pw, err := tui.PromptPassword("sudo password (leave empty if not needed)")
+			if err != nil {
+				return err
+			}
+			cfg.Device.Auth.Password = pw
+		}
+
+	default:
+		if cfg.Device.Auth.Password == "" {
+			pw, err := tui.PromptPassword("device's SSH password")
+			if err != nil {
+				return err
+			}
+			cfg.Device.Auth.Password = pw
+		}
 	}
 
 	if cfg.Device.Port == 0 {
@@ -160,9 +200,6 @@ func bootstrapHandler(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	cfg.Device.IOSVersion = probe.IOSVersion
-	cfg.Device.Arch = probe.Arch
-	cfg.Device.Model = probe.Model
 	if err := cfg.Save(); err != nil {
 		live.Fail("save config: %v", err)
 		dev.Close()
@@ -191,6 +228,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) error {
 
 	prevLines := 0
 	prompt := "press Enter once installed to verify"
+
 	for {
 		if prevLines > 0 {
 			tui.Erase(prevLines)
@@ -260,6 +298,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) error {
 		tui.Err("ssh connect failed: %v", err)
 		return err
 	}
+
 	defer dev.Close()
 
 	live = tui.NewLive()
@@ -276,9 +315,11 @@ func bootstrapHandler(cmd *cobra.Command, args []string) error {
 		tui.Info("the device's code-signing layer rejected the helper's entitlements")
 		return err
 	}
+
 	live.OK("helper ready at %s", helperPath)
 
 	tui.Spacer()
 	tui.OK("bootstrap complete — run `ipadecrypt decrypt <bundle-id>` to decrypt an app")
+
 	return nil
 }
