@@ -56,3 +56,6 @@ release:
     name: ipadecrypt
   draft: false
   prerelease: auto
+  extra_files:
+    - glob: helper/dist/helper.arm64
+      name_template: helper.arm64
