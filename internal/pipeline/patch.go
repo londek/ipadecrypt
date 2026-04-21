@@ -13,42 +13,58 @@ import (
 	"howett.net/plist"
 )
 
-func PatchMinOS(src, dst, target string) (bool, error) {
+func PatchMinOS(src, dst, target string) (bool, string, error) {
 	r, err := zip.OpenReader(src)
 	if err != nil {
-		return false, fmt.Errorf("open %s: %w", src, err)
+		return false, "", fmt.Errorf("open %s: %w", src, err)
 	}
 	defer r.Close()
 
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return false, fmt.Errorf("mkdir %s: %w", filepath.Dir(dst), err)
+		return false, "", fmt.Errorf("mkdir %s: %w", filepath.Dir(dst), err)
 	}
+
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
-		return false, fmt.Errorf("open dst %s: %w", dst, err)
+		return false, "", fmt.Errorf("open dst %s: %w", dst, err)
 	}
+
 	defer out.Close()
 
 	w := zip.NewWriter(out)
 	defer w.Close()
 
 	patched := false
+	previous := ""
 	for _, f := range r.File {
-		if strings.HasSuffix(f.Name, "Info.plist") {
-			changed, err := rewriteInfoPlist(f, target, w)
+		if isMainAppInfoPlist(f.Name) {
+			changed, prev, err := rewriteInfoPlist(f, target, w)
 			if err != nil {
-				return patched, fmt.Errorf("rewrite %s: %w", f.Name, err)
+				return patched, previous, fmt.Errorf("rewrite %s: %w", f.Name, err)
 			}
+
 			if changed {
 				patched = true
+				previous = prev
 			}
+
 			continue
 		}
+
 		if err := copyEntry(f, w); err != nil {
-			return patched, fmt.Errorf("copy %s: %w", f.Name, err)
+			return patched, previous, fmt.Errorf("copy %s: %w", f.Name, err)
 		}
 	}
-	return patched, nil
+
+	return patched, previous, nil
+}
+
+func isMainAppInfoPlist(name string) bool {
+	parts := strings.Split(name, "/")
+	return len(parts) == 3 &&
+		parts[0] == "Payload" &&
+		strings.HasSuffix(parts[1], ".app") &&
+		parts[2] == "Info.plist"
 }
 
 func copyEntry(f *zip.File, w *zip.Writer) error {
@@ -68,37 +84,37 @@ func copyEntry(f *zip.File, w *zip.Writer) error {
 	return err
 }
 
-func rewriteInfoPlist(f *zip.File, target string, w *zip.Writer) (bool, error) {
+func rewriteInfoPlist(f *zip.File, target string, w *zip.Writer) (bool, string, error) {
 	rc, err := f.Open()
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 
 	data, err := io.ReadAll(rc)
 	rc.Close()
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 
 	var m map[string]interface{}
 	format, err := plist.Unmarshal(data, &m)
 	if err != nil {
 		// Not a parseable plist at this path; pass through unchanged.
-		return false, writeBytes(f, w, data)
+		return false, "", writeBytes(f, w, data)
 	}
 
 	current, _ := m["MinimumOSVersion"].(string)
 	if current == "" || cmpVer(current, target) <= 0 {
-		return false, writeBytes(f, w, data)
+		return false, "", writeBytes(f, w, data)
 	}
 
 	m["MinimumOSVersion"] = target
 	newData, err := plist.Marshal(m, format)
 	if err != nil {
-		return false, fmt.Errorf("marshal plist: %w", err)
+		return false, "", fmt.Errorf("marshal plist: %w", err)
 	}
 
-	return true, writeBytes(f, w, newData)
+	return true, current, writeBytes(f, w, newData)
 }
 
 func writeBytes(f *zip.File, w *zip.Writer, data []byte) error {

@@ -39,7 +39,7 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	tui.OK("signed in as %s", cfg.Apple.Account.Email)
+	tui.OK("signed in as %s", "#######@gmail.com")
 
 	// --- connect ---
 	live := tui.NewLive()
@@ -172,7 +172,7 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 
 	live = tui.NewLive()
 	live.Spin("patching Info.plist for MinimumOSVersion %s", cfg.Device.IOSVersion)
-	changed, err := pipeline.PatchMinOS(encPath, tmp, cfg.Device.IOSVersion)
+	changed, previous, err := pipeline.PatchMinOS(encPath, tmp, cfg.Device.IOSVersion)
 	if err != nil {
 		live.Fail("patch MinOS failed")
 		_ = os.Remove(tmp)
@@ -182,7 +182,7 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 	if changed {
 		uploadPath = tmp
 		patchedPath = tmp
-		live.OK("MinimumOSVersion → %s", cfg.Device.IOSVersion)
+		live.OK("MinimumOSVersion %s → %s", previous, cfg.Device.IOSVersion)
 	} else {
 		_ = os.Remove(tmp)
 		live.OK("no MinOS change needed")
