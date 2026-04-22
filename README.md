@@ -78,13 +78,6 @@ A four-step interactive wizard:
 ipadecrypt decrypt <bundle-id|app-store-id|app-store-url|path-to-local-ipa>
 ```
 
-By default the decrypted IPA is written to the current directory. Use `-o`/`--output` to change the output file path:
-
-```sh
-ipadecrypt decrypt com.example.app -o ~/Desktop/decryptedapp.ipa
-ipadecrypt decrypt com.example.app -o ~/Desktop/
-```
-
 ## License
 
 MIT.
