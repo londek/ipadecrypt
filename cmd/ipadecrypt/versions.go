@@ -29,7 +29,7 @@ func parseVersionsArg(raw string) (versionsTarget, error) {
 		return versionsTarget{}, err
 	}
 	if dt.localPath != "" {
-		return versionsTarget{}, errors.New("versions: local IPA paths are not supported - pass a bundle-id or app-store-id")
+		return versionsTarget{}, errors.New("versions: local IPA paths are not supported - pass a bundle-id, app-store-id, or app-store-url")
 	}
 
 	return versionsTarget{bundleId: dt.bundleId, appId: dt.appId}, nil

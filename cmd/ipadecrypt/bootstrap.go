@@ -331,5 +331,5 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 	live.OK("helper ready at %s", helperPath)
 
 	tui.Spacer()
-	tui.OK("bootstrap complete - run `ipadecrypt decrypt <bundle-id>` to decrypt an app")
+	tui.OK("bootstrap complete - run `ipadecrypt decrypt <bundle-id|app-store-id|app-store-url|path-to-local-ipa>` to decrypt an app")
 }

@@ -41,8 +41,8 @@ func main() {
 	bootstrap.Flags().BoolVar(&bootstrapReset, "reset", false, "forget cached credentials and re-prompt")
 
 	decrypt := &cobra.Command{
-		Use:   "decrypt <bundle-id|app-store-id|path-to-local-ipa>",
-		Short: "Download, install, decrypt, and retrieve an app by bundle ID or App Store ID",
+		Use:   "decrypt <bundle-id|app-store-id|app-store-url|path-to-local-ipa>",
+		Short: "Download, install, decrypt, and retrieve an app by bundle ID, App Store ID, or App Store URL",
 		Args:  cobra.ExactArgs(1),
 		Run:   decryptHandler,
 	}
@@ -53,7 +53,7 @@ func main() {
 	decrypt.Flags().BoolVar(&decryptKeepWatch, "keep-watch", false, "keep the Watch/ directory (watchOS binaries that remain encrypted)")
 
 	versions := &cobra.Command{
-		Use:   "versions <bundle-id|app-store-id>",
+		Use:   "versions <bundle-id|app-store-id|app-store-url>",
 		Short: "Browse the App Store version history of an app",
 		Long:  "Opens an interactive table of every App Store release of the given app. Metadata for the 3 newest versions is fetched eagerly; older versions are fetched on-demand (Enter on a row) and cached on disk.",
 		Args:  cobra.ExactArgs(1),

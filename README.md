@@ -75,7 +75,7 @@ A four-step interactive wizard:
 ### Decrypt an app
 
 ```sh
-ipadecrypt decrypt <bundle-id|app-store-id|path-to-local-ipa>
+ipadecrypt decrypt <bundle-id|app-store-id|app-store-url|path-to-local-ipa>
 ```
 
 ## License
