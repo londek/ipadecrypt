@@ -15,6 +15,7 @@ var (
 	bootstrapReset bool
 
 	decryptExtVerID     string
+	decryptOutput       string
 	decryptNoCleanup    bool
 	decryptKeepMetadata bool
 	decryptNoVerify     bool
@@ -47,6 +48,7 @@ func main() {
 		Run:   decryptHandler,
 	}
 	decrypt.Flags().StringVar(&decryptExtVerID, "external-version-id", "", "pin to a specific historical App Store version")
+	decrypt.Flags().StringVarP(&decryptOutput, "output", "o", "", "output path for the decrypted IPA (default: ./<bundleID>_<version>.decrypted.ipa)")
 	decrypt.Flags().BoolVar(&decryptNoCleanup, "no-cleanup", false, "leave remote staging files in place")
 	decrypt.Flags().BoolVar(&decryptKeepMetadata, "keep-metadata", false, "keep iTunesMetadata.plist (Apple ID + purchase info) in the output IPA")
 	decrypt.Flags().BoolVar(&decryptNoVerify, "no-verify", false, "skip the post-decrypt cryptid==0 check on every Mach-O")

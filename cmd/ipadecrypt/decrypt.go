@@ -423,7 +423,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 	live.OK("%s", progress.Summary())
 
-	outLocal, err := localOutputPath(appBundleID, appVersion)
+	outLocal, err := localOutputPath(decryptOutput, appBundleID, appVersion)
 	if err != nil {
 		tui.Err("output path: %v", err)
 		return
@@ -703,13 +703,28 @@ func remoteOutputPath(bundleID, version string) string {
 	)
 }
 
-func localOutputPath(bundleID, version string) (string, error) {
-	cwd, err := os.Getwd()
+func localOutputPath(override, bundleID, version string) (string, error) {
+	defaultName := fmt.Sprintf("%s_%s.decrypted.ipa", bundleID, version)
+
+	if override == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(cwd, defaultName), nil
+	}
+
+	abs, err := filepath.Abs(override)
 	if err != nil {
 		return "", err
 	}
 
-	return filepath.Join(cwd, fmt.Sprintf("%s_%s.decrypted.ipa", bundleID, version)), nil
+	// if override is just a directory (not a full file path), place the default filename inside it
+	if info, serr := os.Stat(abs); serr == nil && info.IsDir() {
+		return filepath.Join(abs, defaultName), nil
+	}
+
+	return abs, nil
 }
 
 func cleanupDecrypt(dev *device.Client, noCleanup bool, stagingRemote, outRemote string) {
