@@ -29,7 +29,7 @@ func parseVersionsArg(raw string) (versionsTarget, error) {
 		return versionsTarget{}, err
 	}
 	if dt.localPath != "" {
-		return versionsTarget{}, errors.New("versions: local IPA paths are not supported - pass a bundle-id or app-id")
+		return versionsTarget{}, errors.New("versions: local IPA paths are not supported - pass a bundle-id or app-store-id")
 	}
 
 	return versionsTarget{bundleId: dt.bundleId, appId: dt.appId}, nil
@@ -341,4 +341,3 @@ func logVersionsResponse(path, kind, bundleID, extVerID string, raw map[string]a
 
 	_, _ = f.Write(append(data, '\n'))
 }
-
