@@ -410,12 +410,11 @@ func monotonicVersionFill(newer, older string, slots int) []string {
 	default:
 		// slots > n. Copy path into top slots, fill the rest with
 		// hotfixes of older at the bottom.
-		for i, c := range path {
-			out[i] = c
-		}
+		copy(out, path)
+
 		if nm[1] > om[1] {
 			remaining := slots - n
-			for i := 0; i < remaining; i++ {
+			for i := range remaining {
 				hotfixPatch := om[2] + (remaining - i)
 				out[n+i] = fmt.Sprintf("%d.%d.%d", om[0], om[1], hotfixPatch)
 			}
