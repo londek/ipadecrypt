@@ -10,6 +10,8 @@ import (
 	"io"
 	"path"
 	"strings"
+
+	"howett.net/plist"
 )
 
 //go:embed helper.arm64
@@ -132,19 +134,6 @@ func (c *Client) Install(appinstPath, ipaRemote string) error {
 	return nil
 }
 
-func (c *Client) Uninstall(appinstPath, bundleID string) error {
-	_, errOut, code, err := c.RunSudo(fmt.Sprintf("%s -u %q", appinstPath, bundleID))
-	if err != nil {
-		return fmt.Errorf("appinst -u: %w", err)
-	}
-
-	if code != 0 {
-		return fmt.Errorf("appinst -u exit %d: %s", code, errOut)
-	}
-
-	return nil
-}
-
 func (c *Client) EnsureHelper() (string, error) {
 	sum := sha256.Sum256(helperArm64)
 	remote := path.Join(RemoteRoot, "helpers",
@@ -177,6 +166,48 @@ func (c *Client) HashFile(helperPath, path string) (string, error) {
 	}
 
 	return strings.TrimSpace(out), nil
+}
+
+// InstalledVersion reads CFBundleShortVersionString (falling back to
+// CFBundleVersion) from an installed app bundle's Info.plist.
+func (c *Client) InstalledVersion(bundlePath string) (string, error) {
+	infoPath := path.Join(bundlePath, "Info.plist")
+
+	out, errOut, code, err := c.RunSudo(fmt.Sprintf("cat %q", infoPath))
+	if err != nil {
+		return "", fmt.Errorf("read installed version: %w", err)
+	}
+
+	if code != 0 {
+		return "", fmt.Errorf("read installed version exit %d: %s", code, strings.TrimSpace(errOut))
+	}
+
+	var info map[string]any
+	if _, err := plist.Unmarshal([]byte(out), &info); err != nil {
+		return "", fmt.Errorf("parse installed Info.plist: %w", err)
+	}
+
+	if version, _ := info["CFBundleShortVersionString"].(string); version != "" {
+		return version, nil
+	}
+
+	if version, _ := info["CFBundleVersion"].(string); version != "" {
+		return version, nil
+	}
+
+	if version, ok := info["CFBundleShortVersionString"]; ok {
+		return strings.TrimSpace(fmt.Sprintf("%v", version)), nil
+	}
+
+	if version, ok := info["CFBundleVersion"]; ok {
+		return strings.TrimSpace(fmt.Sprintf("%v", version)), nil
+	}
+
+	if out == "" {
+		return "", errors.New("installed version not found")
+	}
+
+	return "", errors.New("installed version not found")
 }
 
 func (c *Client) FindInstalled(helperPath, appDirName string) (string, error) {

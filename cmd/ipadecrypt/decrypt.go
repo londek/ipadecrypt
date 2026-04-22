@@ -48,8 +48,10 @@ type installPlan struct {
 }
 
 type installResult struct {
-	bundlePath string
-	installed  bool
+	bundlePath      string
+	installed       bool
+	reinstalled     bool
+	previousVersion string
 }
 
 type sourceDisposition byte
@@ -59,15 +61,17 @@ const (
 	sourceDispositionDownloaded
 )
 
-type installedBundleMismatchError struct {
-	wantSum    string
-	gotSum     string
-	bundlePath string
-}
+type installEvent int
 
-func (e *installedBundleMismatchError) Error() string {
-	return "installed bundle sha256 mismatch"
-}
+const (
+	installHashIPA installEvent = iota + 1
+	installHashInstalled
+	installReadInstalledVersion
+	installReplaceInstalled
+	installUpload
+	installRunAppinst
+	installRescan
+)
 
 type helperUpdate struct {
 	spin         string
@@ -308,35 +312,41 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	live = tui.NewLive()
 	if plan.bundlePath == "" {
-		live = tui.NewLive()
-		live.Spin("uploading IPA to device")
+		live.Spin("preparing install")
 	} else {
-		live = tui.NewLive()
-		live.Spin("verifying installed bundle matches IPA")
+		live.Note("app already installed at %s", plan.bundlePath)
+		live.Spin("checking installed app")
 	}
 
-	install, err := ensureInstalledBundle(dev, plan, patch.uploadPath)
+	install, err := ensureInstalledBundle(dev, plan, patch.uploadPath, func(e installEvent) {
+		switch e {
+		case installHashIPA:
+			live.Spin("computing IPA checksum")
+		case installHashInstalled:
+			live.Spin("computing installed app checksum")
+		case installReadInstalledVersion:
+			live.Spin("reading installed app version")
+		case installReplaceInstalled:
+			live.Spin("installed app differs - replacing it")
+		case installUpload:
+			live.Spin("uploading IPA to device")
+		case installRunAppinst:
+			live.Spin("running appinst")
+		case installRescan:
+			live.Spin("locating installed app")
+		}
+	})
 	if err != nil {
-		if plan.bundlePath == "" {
-			live.Fail("install failed")
-		} else {
-			live.Fail("verification failed")
-		}
-
-		var mismatch *installedBundleMismatchError
-		switch {
-		case errors.As(err, &mismatch):
-			tui.Err("sha256 mismatch: IPA=%s device=%s", shortHash(mismatch.wantSum), shortHash(mismatch.gotSum))
-			tui.Info("uninstall the app on the device (or delete %s) and re-run", mismatch.bundlePath)
-		default:
-			tui.Err("install: %v", err)
-		}
-
+		live.Fail("install failed")
+		tui.Err("install: %v", err)
 		return err
 	}
 
-	if install.installed {
+	if install.reinstalled {
+		live.OK("reinstalled (%s => %s) → %s", install.previousVersion, appVersion, install.bundlePath)
+	} else if install.installed {
 		live.OK("installed → %s", install.bundlePath)
 	} else {
 		live.OK("already installed → %s", install.bundlePath)
@@ -444,11 +454,7 @@ func decryptHandler(cmd *cobra.Command, args []string) error {
 		live.OK("%d Mach-O(s) verified cryptid=0%s", res.Scanned, suffix)
 	}
 
-	cleanup := cleanupDecrypt(dev, decryptNoCleanup, plan.stagingRemote, outRemote,
-		decryptUninstall, plan.appinstPath, appBundleID)
-	if cleanup.uninstallErr != nil {
-		tui.Warn("uninstall: %v", cleanup.uninstallErr)
-	}
+	cleanupDecrypt(dev, decryptNoCleanup, plan.stagingRemote, outRemote)
 
 	return nil
 }
@@ -581,56 +587,76 @@ func buildInstallPlan(dev *device.Client, uploadPath string) (installPlan, error
 	}, nil
 }
 
-func ensureInstalledBundle(dev *device.Client, plan installPlan, uploadPath string) (installResult, error) {
-	if plan.bundlePath == "" {
-		if err := dev.Upload(uploadPath, plan.stagingRemote); err != nil {
-			return installResult{}, fmt.Errorf("upload: %w", err)
+func ensureInstalledBundle(dev *device.Client, plan installPlan, uploadPath string, onEvent func(installEvent)) (installResult, error) {
+	notify := func(e installEvent) {
+		if onEvent != nil {
+			onEvent(e)
 		}
-
-		if err := dev.Install(plan.appinstPath, plan.stagingRemote); err != nil {
-			return installResult{}, fmt.Errorf("install: %w", err)
-		}
-
-		appDirName, err := pipeline.AppDirName(uploadPath)
-		if err != nil {
-			return installResult{}, fmt.Errorf("read IPA: %w", err)
-		}
-
-		bundlePath, err := dev.FindInstalled(plan.helperPath, appDirName)
-		if err != nil {
-			return installResult{}, fmt.Errorf("post-install scan: %w", err)
-		}
-		if bundlePath == "" {
-			return installResult{}, errors.New("install reported success but bundle not found")
-		}
-
-		return installResult{
-			bundlePath: bundlePath,
-			installed:  true,
-		}, nil
 	}
 
+	if plan.bundlePath == "" {
+		return installUploadedBundle(dev, plan, uploadPath, false, "", notify)
+	}
+
+	notify(installHashIPA)
 	execName, wantSum, err := pipeline.MainExecSHA256(uploadPath)
 	if err != nil {
 		return installResult{}, fmt.Errorf("hash ipa: %w", err)
 	}
 
 	remoteExec := filepath.ToSlash(filepath.Join(plan.bundlePath, execName))
+	notify(installHashInstalled)
 	gotSum, err := dev.HashFile(plan.helperPath, remoteExec)
 	if err != nil {
 		return installResult{}, fmt.Errorf("hash device: %w", err)
 	}
 
-	if gotSum != wantSum {
-		return installResult{}, &installedBundleMismatchError{
-			wantSum:    wantSum,
-			gotSum:     gotSum,
+	if gotSum == wantSum {
+		return installResult{
 			bundlePath: plan.bundlePath,
-		}
+		}, nil
+	}
+
+	notify(installReadInstalledVersion)
+	previousVersion, err := dev.InstalledVersion(plan.bundlePath)
+	if err != nil {
+		previousVersion = ""
+	}
+
+	notify(installReplaceInstalled)
+	return installUploadedBundle(dev, plan, uploadPath, true, previousVersion, notify)
+}
+
+func installUploadedBundle(dev *device.Client, plan installPlan, uploadPath string, reinstalled bool, previousVersion string, notify func(installEvent)) (installResult, error) {
+	notify(installUpload)
+	if err := dev.Upload(uploadPath, plan.stagingRemote); err != nil {
+		return installResult{}, fmt.Errorf("upload: %w", err)
+	}
+
+	notify(installRunAppinst)
+	if err := dev.Install(plan.appinstPath, plan.stagingRemote); err != nil {
+		return installResult{}, fmt.Errorf("install: %w", err)
+	}
+
+	appDirName, err := pipeline.AppDirName(uploadPath)
+	if err != nil {
+		return installResult{}, fmt.Errorf("read IPA: %w", err)
+	}
+
+	notify(installRescan)
+	bundlePath, err := dev.FindInstalled(plan.helperPath, appDirName)
+	if err != nil {
+		return installResult{}, fmt.Errorf("post-install scan: %w", err)
+	}
+	if bundlePath == "" {
+		return installResult{}, errors.New("install reported success but bundle not found")
 	}
 
 	return installResult{
-		bundlePath: plan.bundlePath,
+		bundlePath:      bundlePath,
+		installed:       true,
+		reinstalled:     reinstalled,
+		previousVersion: previousVersion,
 	}, nil
 }
 
@@ -649,37 +675,18 @@ func localOutputPath(bundleID, version string) (string, error) {
 	return filepath.Join(cwd, fmt.Sprintf("%s_%s.decrypted.ipa", bundleID, version)), nil
 }
 
-type cleanupResult struct {
-	uninstallErr error
-}
-
-func cleanupDecrypt(dev *device.Client, noCleanup bool, stagingRemote, outRemote string, uninstall bool, appinstPath, bundleID string) cleanupResult {
-	var result cleanupResult
-
+func cleanupDecrypt(dev *device.Client, noCleanup bool, stagingRemote, outRemote string) {
 	if noCleanup {
-		return result
+		return
 	}
 
 	_ = dev.Remove(stagingRemote)
 	_ = dev.Remove(outRemote)
-
-	if uninstall {
-		result.uninstallErr = dev.Uninstall(appinstPath, bundleID)
-	}
-
-	return result
 }
 
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
-}
-
-func shortHash(sum string) string {
-	if len(sum) <= 12 {
-		return sum
-	}
-	return sum[:12] + "…"
 }
 
 func (p *helperProgress) HandleEvent(ev device.Event) helperUpdate {
