@@ -491,7 +491,9 @@ func fetchRemoteEncryptedSource(cfg *config.Config, paths *config.Paths, as *app
 		}
 	}
 
-	ticket, err := prepareDownload(cfg, as, app, extVerID, 3, onAuth)
+	ticket, err := withAuth(cfg, as, app, 3, onAuth, func() (appstore.DownloadTicket, error) {
+		return as.PrepareDownload(cfg.Apple.Account, app, extVerID)
+	})
 	if err != nil {
 		return remoteSourceDisposition{}, err
 	}
@@ -790,97 +792,4 @@ func (p *helperProgress) Summary() string {
 	}
 
 	return summary
-}
-
-// authEvent names recovery steps that downloadWithAuth takes. Callers can
-// map these to whatever UI / logging they want; the store helpers below stay
-// ignorant of TUI so they read as pure App Store logic.
-type authEvent int
-
-const (
-	authReauth           authEvent = iota + 1 // re-authenticating because the token expired
-	authLicense                               // acquiring a license before retrying
-	authRetryingDownload                      // kicking the download off again
-)
-
-// reauth refreshes the App Store password token by logging in again with
-// stored credentials. Updates cfg.Apple.Account in place and persists it.
-func reauth(cfg *config.Config, as *appstore.Client) error {
-	acc, err := as.Login(cfg.Apple.Email, cfg.Apple.Password, "")
-	if err != nil {
-		return fmt.Errorf("re-auth: %w", err)
-	}
-
-	cfg.Apple.Account = acc
-
-	if err := cfg.Save(); err != nil {
-		return fmt.Errorf("save config: %w", err)
-	}
-	return nil
-}
-
-// acquireLicense purchases the app (free apps still need a VPP-style license
-// entry). Handles mid-purchase token expiry by re-authenticating once and
-// retrying. ErrLicenseAlreadyExists is treated as success.
-func acquireLicense(cfg *config.Config, as *appstore.Client, app appstore.App) error {
-	perr := as.Purchase(cfg.Apple.Account, app)
-	if errors.Is(perr, appstore.ErrPasswordTokenExpired) {
-		if rerr := reauth(cfg, as); rerr != nil {
-			return rerr
-		}
-
-		perr = as.Purchase(cfg.Apple.Account, app)
-	}
-
-	if perr != nil && !errors.Is(perr, appstore.ErrLicenseAlreadyExists) {
-		return fmt.Errorf("purchase: %w", perr)
-	}
-
-	return nil
-}
-
-// prepareDownload retries PrepareDownload up to `retries` times, recovering
-// from the two well-known recoverable errors: ErrPasswordTokenExpired via
-// reauth and ErrLicenseRequired via acquireLicense. Any other error returns
-// immediately. `onEvent`, if non-nil, is invoked for each recovery step so
-// callers can drive their UI (see authEvent). Only Prepare needs retries -
-// CompleteDownload hits the CDN and doesn't touch the auth-sensitive endpoint.
-func prepareDownload(cfg *config.Config, as *appstore.Client, app appstore.App, extVerID string, retries int, onEvent func(authEvent)) (appstore.DownloadTicket, error) {
-	notify := func(e authEvent) {
-		if onEvent != nil {
-			onEvent(e)
-		}
-	}
-
-	for range retries {
-		ticket, err := as.PrepareDownload(cfg.Apple.Account, app, extVerID)
-		if err == nil {
-			return ticket, nil
-		}
-
-		switch {
-		case errors.Is(err, appstore.ErrPasswordTokenExpired):
-			notify(authReauth)
-
-			if rerr := reauth(cfg, as); rerr != nil {
-				return appstore.DownloadTicket{}, rerr
-			}
-
-			notify(authRetryingDownload)
-
-		case errors.Is(err, appstore.ErrLicenseRequired):
-			notify(authLicense)
-
-			if lerr := acquireLicense(cfg, as, app); lerr != nil {
-				return appstore.DownloadTicket{}, lerr
-			}
-
-			notify(authRetryingDownload)
-
-		default:
-			return appstore.DownloadTicket{}, err
-		}
-	}
-
-	return appstore.DownloadTicket{}, errors.New("download: exhausted retries")
 }

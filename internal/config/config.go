@@ -13,11 +13,16 @@ import (
 const SchemaVersion = 1
 
 type Config struct {
-	Version int    `json:"version"`
-	Apple   Apple  `json:"apple"`
-	Device  Device `json:"device"`
+	Version  int      `json:"version"`
+	Apple    Apple    `json:"apple"`
+	Device   Device   `json:"device"`
+	Versions Versions `json:"versions,omitempty"`
 
 	path string
+}
+
+type Versions struct {
+	WarningAccepted bool `json:"warningAccepted,omitempty"`
 }
 
 type Apple struct {

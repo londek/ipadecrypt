@@ -72,6 +72,34 @@ func metaString(m map[string]any, key string) string {
 	return ""
 }
 
+// metaIntSlice reads a []any of numeric values from the metadata map and
+// returns them as []int. plist decoding yields int64/uint64/float64, hence
+// the type switch.
+func metaIntSlice(m map[string]any, key string) []int {
+	v, ok := m[key]
+	if !ok {
+		return nil
+	}
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]int, 0, len(arr))
+	for _, e := range arr {
+		switch n := e.(type) {
+		case int:
+			out = append(out, n)
+		case int64:
+			out = append(out, int(n))
+		case uint64:
+			out = append(out, int(n))
+		case float64:
+			out = append(out, int(n))
+		}
+	}
+	return out
+}
+
 type downloadItem struct {
 	URL       string         `plist:"URL,omitempty"`
 	Sinfs     []Sinf         `plist:"sinfs,omitempty"`
@@ -94,9 +122,27 @@ type downloadResult struct {
 // On ErrPasswordTokenExpired the caller must re-Login and retry.
 // On ErrLicenseRequired the caller must Purchase and retry.
 func (c *Client) PrepareDownload(acc *Account, app App, externalVersionID string) (DownloadTicket, error) {
-	g, err := guid()
+	item, err := c.volumeDownload(acc, app, externalVersionID)
 	if err != nil {
 		return DownloadTicket{}, err
+	}
+
+	return DownloadTicket{
+		URL:       item.URL,
+		Sinfs:     item.Sinfs,
+		Metadata:  item.Metadata,
+		AssetInfo: item.AssetInfo,
+	}, nil
+}
+
+// volumeDownload is the shared POST to the volumeStoreDownloadProduct
+// endpoint used for both authorized downloads and metadata-only lookups
+// (list versions, get per-version metadata). The endpoint is the same;
+// whether externalVersionID is set decides what is returned.
+func (c *Client) volumeDownload(acc *Account, app App, externalVersionID string) (downloadItem, error) {
+	g, err := guid()
+	if err != nil {
+		return downloadItem{}, err
 	}
 
 	podPrefix := ""
@@ -117,7 +163,7 @@ func (c *Client) PrepareDownload(acc *Account, app App, externalVersionID string
 
 	body, err := plistBody(payload)
 	if err != nil {
-		return DownloadTicket{}, err
+		return downloadItem{}, err
 	}
 
 	headers := map[string]string{
@@ -128,7 +174,7 @@ func (c *Client) PrepareDownload(acc *Account, app App, externalVersionID string
 
 	var out downloadResult
 	if _, err := c.send(http.MethodPost, url, headers, body, formatXML, &out); err != nil {
-		return DownloadTicket{}, fmt.Errorf("download: %w", err)
+		return downloadItem{}, fmt.Errorf("download: %w", err)
 	}
 
 	switch {
@@ -136,24 +182,18 @@ func (c *Client) PrepareDownload(acc *Account, app App, externalVersionID string
 		out.FailureType == failureSignInRequired,
 		out.FailureType == failureDeviceVerificationFailed,
 		out.FailureType == failureLicenseAlreadyExists:
-		return DownloadTicket{}, ErrPasswordTokenExpired
+		return downloadItem{}, ErrPasswordTokenExpired
 	case out.FailureType == failureLicenseNotFound:
-		return DownloadTicket{}, ErrLicenseRequired
+		return downloadItem{}, ErrLicenseRequired
 	case out.FailureType != "" && out.CustomerMessage != "":
-		return DownloadTicket{}, errors.New(out.CustomerMessage)
+		return downloadItem{}, errors.New(out.CustomerMessage)
 	case out.FailureType != "":
-		return DownloadTicket{}, fmt.Errorf("download: %s", out.FailureType)
+		return downloadItem{}, fmt.Errorf("download: %s", out.FailureType)
 	case len(out.Items) == 0:
-		return DownloadTicket{}, errors.New("download: empty songList")
+		return downloadItem{}, errors.New("download: empty songList")
 	}
 
-	item := out.Items[0]
-	return DownloadTicket{
-		URL:       item.URL,
-		Sinfs:     item.Sinfs,
-		Metadata:  item.Metadata,
-		AssetInfo: item.AssetInfo,
-	}, nil
+	return out.Items[0], nil
 }
 
 // CompleteDownload fetches the IPA described by `ticket` into outPath,

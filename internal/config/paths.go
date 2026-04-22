@@ -48,6 +48,29 @@ func (p *Paths) CachedEncryptedIPA(bundleID string, version string) (string, err
 	return filepath.Join(dir, fmt.Sprintf("%s_%s.ipa", bundleID, version)), nil
 }
 
+func (p *Paths) VersionsCacheFile(bundleID string) (string, error) {
+	dir, err := p.CacheDir()
+	if err != nil {
+		return "", err
+	}
+
+	versionsDir, err := p.ensure(filepath.Join(dir, "versions"))
+	if err != nil {
+		return "", err
+	}
+
+	return filepath.Join(versionsDir, bundleID+".json"), nil
+}
+
+func (p *Paths) VersionsLog() (string, error) {
+	logDir, err := p.ensure(filepath.Join(p.Root, "logs"))
+	if err != nil {
+		return "", err
+	}
+
+	return filepath.Join(logDir, "versions.log"), nil
+}
+
 func (p *Paths) ensure(dir string) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("mkdir %s: %w", dir, err)

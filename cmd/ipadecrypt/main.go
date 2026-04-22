@@ -24,6 +24,8 @@ var (
 	decryptKeepMetadata bool
 	decryptNoVerify     bool
 	decryptKeepWatch    bool
+
+	versionsLogResponses bool
 )
 
 func main() {
@@ -57,7 +59,16 @@ func main() {
 	decrypt.Flags().BoolVar(&decryptNoVerify, "no-verify", false, "skip the post-decrypt cryptid==0 check on every Mach-O")
 	decrypt.Flags().BoolVar(&decryptKeepWatch, "keep-watch", false, "keep the Watch/ directory (watchOS binaries that remain encrypted)")
 
-	root.AddCommand(bootstrap, decrypt)
+	versions := &cobra.Command{
+		Use:   "versions <bundle-id|app-store-id>",
+		Short: "Browse the App Store version history of an app",
+		Long:  "Opens an interactive table of every App Store release of the given app. Metadata for the 3 newest versions is fetched eagerly; older versions are fetched on-demand (Enter on a row) and cached on disk.",
+		Args:  cobra.ExactArgs(1),
+		RunE:  versionsHandler,
+	}
+	versions.Flags().BoolVar(&versionsLogResponses, "log-responses", false, "append each API response as a JSONL record to ~/.ipadecrypt/logs/versions.log")
+
+	root.AddCommand(bootstrap, decrypt, versions)
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
