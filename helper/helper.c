@@ -6,18 +6,18 @@
 // PlugIns/*.appex and Extensions/*.appex in the bundle.
 //
 // CLI: ipadecrypt-helper-arm64 <bundle-id> <bundle-src> <out-ipa>
-//   bundle-id  — CFBundleIdentifier of the main app, or "" to skip the main
+//   bundle-id  - CFBundleIdentifier of the main app, or "" to skip the main
 //                app pass. Used for SpringBoard's SBSLaunch SPI which is the
 //                only way to spawn cross-OS binaries on Dopamine.
-//   bundle-src — absolute path to the installed .app on disk
-//   out-ipa    — absolute path to write the decrypted IPA to
+//   bundle-src - absolute path to the installed .app on disk
+//   out-ipa    - absolute path to write the decrypted IPA to
 //
 // Spawn-path selection (best-to-worst AMFI tolerance):
 //   1. SBSLaunchApplicationWithIdentifier(bundle-id, suspended=1)
 //      SpringBoard spawns the target for us. Its process is CS_PLATFORM_BINARY
 //      so its posix_spawn satisfies AMFI's minOS check even for iOS-18/26
 //      binaries on iOS-16. Only works when bundle-id is registered with
-//      LaunchServices — main apps only; appexes return kSBSError(7).
+//      LaunchServices - main apps only; appexes return kSBSError(7).
 //   2. posix_spawn(POSIX_SPAWN_START_SUSPENDED)
 //      Works for same-OS binaries; Dopamine AMFI SIGKILLs cross-OS ones in
 //      kernel before we get back the task port.
@@ -60,11 +60,11 @@ extern kern_return_t mach_vm_region(vm_map_t, mach_vm_address_t *,
     mach_vm_size_t *, vm_region_flavor_t, vm_region_info_t,
     mach_msg_type_number_t *, mach_port_t *);
 
-// libproc SPI — not in iOS SDK.
+// libproc SPI - not in iOS SDK.
 extern int proc_listallpids(void *, int);
 extern int proc_pidpath(int, void *, uint32_t);
 
-// ptrace — sys/ptrace.h is iOS-hidden. We only need these two requests.
+// ptrace - sys/ptrace.h is iOS-hidden. We only need these two requests.
 #ifndef PT_TRACE_ME
 #define PT_TRACE_ME 0
 #endif
@@ -408,7 +408,7 @@ static int sbs_launch(const char *bundle_id, const char *exec_path,
         return -1;
     }
     // SBS's suspended:1 relies on xpcproxy's "not ready" signal, not a real
-    // task_suspend we can observe — by the time we grab the task, dyld may
+    // task_suspend we can observe - by the time we grab the task, dyld may
     // be running. Freeze it ourselves so the address space is stable.
     task_suspend(task);
     *out_pid = pid;
@@ -621,7 +621,7 @@ static int dump_image(const char *src, const char *dst, task_t task,
     // Sanity: scan the whole cryptoff region. If every byte is zero the
     // cryptoff pages were never page-faulted by the target (kernel returned
     // us the zero-filled backing store, not the decrypted content). Skip
-    // writing so the dst stays as the original encrypted file — user gets a
+    // writing so the dst stays as the original encrypted file - user gets a
     // cryptid=1 framework which at least surfaces the failure rather than a
     // cryptid=0 with broken bytes.
     {
@@ -631,7 +631,7 @@ static int dump_image(const char *src, const char *dst, task_t task,
             if (p[k]) { nonzero = 1; break; }
         }
         if (!nonzero) {
-            ERR("cryptoff read all zeros for %s — target hadn't faulted the pages yet", src);
+            ERR("cryptoff read all zeros for %s - target hadn't faulted the pages yet", src);
             free(buf); return -1;
         }
     }
@@ -641,7 +641,7 @@ static int dump_image(const char *src, const char *dst, task_t task,
     memcpy(buf + info->cryptid_file_offset, &zero, sizeof(zero));
 
     mkdirs(dst); // no-op if parent exists; creates parent if not
-    // mkdirs above actually mkdirs the file path as a dir — fix by doing
+    // mkdirs above actually mkdirs the file path as a dir - fix by doing
     // parent only:
     char parent[4096];
     snprintf(parent, sizeof(parent), "%s", dst);
@@ -721,8 +721,8 @@ static void run_and_suspend(task_t task, pid_t pid, int via_ptrace,
 
 // Find main executable name from CFBundleExecutable in Info.plist, or fall
 // back to "the single Mach-O file whose name matches the bundle dir sans
-// .app/.appex suffix" heuristic. We avoid parsing plist here — plist format
-// varies (XML vs binary) — and use the heuristic as a simple, robust enough
+// .app/.appex suffix" heuristic. We avoid parsing plist here - plist format
+// varies (XML vs binary) - and use the heuristic as a simple, robust enough
 // alternative.
 static int find_main_name(const char *bundle, char *out, size_t cap) {
     // Heuristic: try the bundle basename sans trailing .app/.appex; verify

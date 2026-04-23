@@ -214,10 +214,10 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 	//
 	// If a bundle-id target is already installed, offer to decrypt the
 	// on-device build (e.g. TestFlight) instead of reinstalling from the
-	// App Store. Non-TTY aborts — no way to confirm.
+	// App Store. Non-TTY aborts - no way to confirm.
 	//
 
-	if target.bundleId != "" {
+	if target.bundleId != "" && !decryptForce {
 		live = tui.NewLive()
 		live.Spin("checking if %s is installed", target.bundleId)
 		installedPath, err := dev.FindInstalledByBundleID(target.bundleId)
@@ -242,7 +242,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 			}
 
 			idx, serr := tui.Select(
-				fmt.Sprintf("%s v%s is installed — which build do you want decrypted?", target.bundleId, version),
+				fmt.Sprintf("%s v%s is installed - which build do you want decrypted?", target.bundleId, version),
 				[]string{
 					fmt.Sprintf("Installed build v%s (no App Store reinstall)", version),
 					"Latest from App Store (will reinstall, overwriting installed)",
@@ -689,23 +689,25 @@ func ensureInstalledBundle(dev *device.Client, plan installPlan, uploadPath stri
 		return installUploadedBundle(dev, plan, uploadPath, false, "", notify, onProgress)
 	}
 
-	notify(installHashIPA)
-	execName, wantSum, err := pipeline.MainExecSHA256(uploadPath)
-	if err != nil {
-		return installResult{}, fmt.Errorf("hash ipa: %w", err)
-	}
+	if !decryptForce {
+		notify(installHashIPA)
+		execName, wantSum, err := pipeline.MainExecSHA256(uploadPath)
+		if err != nil {
+			return installResult{}, fmt.Errorf("hash ipa: %w", err)
+		}
 
-	remoteExec := filepath.ToSlash(filepath.Join(plan.bundlePath, execName))
-	notify(installHashInstalled)
-	gotSum, err := dev.HashFile(plan.helperPath, remoteExec)
-	if err != nil {
-		return installResult{}, fmt.Errorf("hash device: %w", err)
-	}
+		remoteExec := filepath.ToSlash(filepath.Join(plan.bundlePath, execName))
+		notify(installHashInstalled)
+		gotSum, err := dev.HashFile(plan.helperPath, remoteExec)
+		if err != nil {
+			return installResult{}, fmt.Errorf("hash device: %w", err)
+		}
 
-	if gotSum == wantSum {
-		return installResult{
-			bundlePath: plan.bundlePath,
-		}, nil
+		if gotSum == wantSum {
+			return installResult{
+				bundlePath: plan.bundlePath,
+			}, nil
+		}
 	}
 
 	notify(installReadInstalledVersion)

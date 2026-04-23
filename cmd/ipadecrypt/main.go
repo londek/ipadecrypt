@@ -20,6 +20,7 @@ var (
 	decryptKeepMetadata bool
 	decryptNoVerify     bool
 	decryptKeepWatch    bool
+	decryptForce        bool
 
 	versionsLogResponses bool
 )
@@ -53,6 +54,7 @@ func main() {
 	decrypt.Flags().BoolVar(&decryptKeepMetadata, "keep-metadata", false, "keep iTunesMetadata.plist (Apple ID + purchase info) in the output IPA")
 	decrypt.Flags().BoolVar(&decryptNoVerify, "no-verify", false, "skip the post-decrypt cryptid==0 check on every Mach-O")
 	decrypt.Flags().BoolVar(&decryptKeepWatch, "keep-watch", false, "keep the Watch/ directory")
+	decrypt.Flags().BoolVarP(&decryptForce, "force", "f", false, "force reinstall from provided .ipa source regardless of what's on the device")
 
 	versions := &cobra.Command{
 		Use:   "versions <bundle-id|app-store-id|app-store-url>",
