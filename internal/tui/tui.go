@@ -289,6 +289,7 @@ type liveState struct {
 	msg      string
 	cur, max int64
 	hasBar   bool
+	detail   string
 }
 
 func NewLive() *Live {
@@ -316,41 +317,60 @@ func (l *Live) Message(format string, args ...any) {
 	l.setMessage(fmt.Sprintf(format, args...), false)
 }
 
-// Progress updates the current progress ratio while leaving the current
-// live-line text alone.
-func (l *Live) Progress(cur, max int64) {
+func (l *Live) Progress(cur, max int64, detail ...string) {
 	l.mu.Lock()
+	defer l.mu.Unlock()
+
 	l.state.cur = cur
 	l.state.max = max
 	l.state.hasBar = true
-	l.mu.Unlock()
+
+	if len(detail) > 0 {
+		l.state.detail = detail[0]
+	} else {
+		l.state.detail = ""
+	}
 }
 
 func (l *Live) setMessage(msg string, clearBar bool) {
 	l.mu.Lock()
+
 	prev := l.state
 	l.state.msg = msg
 	if clearBar {
 		l.state.cur = 0
 		l.state.max = 0
 		l.state.hasBar = false
+		l.state.detail = ""
 	}
+
 	st := l.state
 	tty := l.tty
+
 	l.mu.Unlock()
-	if !tty && st.msg != prev.msg {
-		fmt.Fprintln(Out, "  "+st.msg)
+
+	if tty || st.msg == prev.msg {
+		return
 	}
+
+	if !clearBar && prev.hasBar {
+		return
+	}
+
+	fmt.Fprintln(Out, "  "+st.msg)
 }
 
 // Note prints a dim "·" line above the current live line without stopping it.
 func (l *Live) Note(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
 	if l.tty {
 		fmt.Fprint(Out, "\r\033[2K")
 	}
+
 	fmt.Fprintln(Out, "    "+paint(ansiDim, "· "+msg))
 }
 
@@ -369,10 +389,13 @@ func (l *Live) Stop() {
 		l.mu.Unlock()
 		return
 	}
+
 	l.active = false
 	l.mu.Unlock()
+
 	close(l.stop)
 	<-l.done
+
 	l.mu.Lock()
 	fmt.Fprint(Out, "\r\033[2K")
 	l.mu.Unlock()
@@ -380,6 +403,7 @@ func (l *Live) Stop() {
 
 func (l *Live) finish(color, glyph, plain, msg string) {
 	l.Stop()
+
 	if useColor() {
 		fmt.Fprintln(Out, "  "+paint(color+ansiBold, glyph)+" "+msg)
 	} else {
@@ -408,16 +432,22 @@ func (l *Live) loop() {
 func (l *Live) render(tick int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
 	fmt.Fprint(Out, "\r\033[2K")
 	st := l.state
 	frame := spinFrames[tick%len(spinFrames)]
 	line := "  " + paint(ansiCyan+ansiBold, frame)
+
 	if st.msg != "" {
 		line += " " + st.msg
 	}
+
 	if st.hasBar {
 		line += " "
 		line += renderBar(st.cur, st.max)
+		if st.detail != "" {
+			line += " " + paint(ansiDim, st.detail)
+		}
 	}
 	fmt.Fprint(Out, truncate(line, width()))
 }
@@ -427,23 +457,29 @@ func width() int {
 	if !ok {
 		return 100
 	}
+
 	w, _, err := term.GetSize(int(f.Fd()))
 	if err != nil || w <= 0 {
 		return 100
 	}
+
 	return w
 }
 
 func renderBar(cur, max int64) string {
 	const W = 20
+
 	if max <= 0 {
 		return paint(ansiDim, strings.Repeat("░", W)+" …")
 	}
+
 	if cur > max {
 		cur = max
 	}
+
 	filled := int((cur * int64(W)) / max)
 	pct := int((cur * 100) / max)
+
 	return paint(ansiGreen, strings.Repeat("█", filled)) +
 		paint(ansiDim, strings.Repeat("░", W-filled)) +
 		" " + paint(ansiGreen+ansiBold, fmt.Sprintf("%3d%%", pct))
@@ -453,6 +489,7 @@ func truncate(s string, max int) string {
 	if visibleWidth(s) <= max {
 		return s
 	}
+
 	var b strings.Builder
 	inEsc := false
 	visible := 0
@@ -462,6 +499,7 @@ func truncate(s string, max int) string {
 			b.WriteRune(r)
 			continue
 		}
+
 		if inEsc {
 			b.WriteRune(r)
 			if r == 'm' {
@@ -469,13 +507,17 @@ func truncate(s string, max int) string {
 			}
 			continue
 		}
+
 		if visible >= max-1 {
 			break
 		}
+
 		b.WriteRune(r)
 		visible++
 	}
+
 	b.WriteString("…" + ansiReset)
+
 	return b.String()
 }
 
@@ -487,13 +529,16 @@ func visibleWidth(s string) int {
 			inEsc = true
 			continue
 		}
+
 		if inEsc {
 			if r == 'm' {
 				inEsc = false
 			}
 			continue
 		}
+
 		n += utf8.RuneLen(r)
 	}
+
 	return n
 }
