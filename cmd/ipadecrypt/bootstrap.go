@@ -33,7 +33,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 	// ---- Step 1: App Store sign-in -----------------------------------
 
 	tui.Step(1, 4, "Sign in to the App Store")
-	tui.Info("ipadecrypt downloads IPAs through Apple's Configurator endpoint, which\nrequires an Apple ID. Credentials are stored locally on this machine.")
+	tui.Info("ipadecrypt requires an Apple ID to download .ipas.\nIt has to the be same Apple ID used on the jailbroken device.\nCredentials are stored locally on this machine.")
 
 	if cfg.Apple.Email == "" {
 		s, err := tui.Prompt("Apple ID email")
@@ -112,7 +112,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 	tui.Step(2, 4, "Connect to the jailbroken device")
 	tui.Info("ipadecrypt drives the iPhone over SSH. On the device install from Sileo:")
 	tui.Bullet("OpenSSH   search \"OpenSSH\" in Sileo")
-	tui.Info("Find the device IP in Settings → Wi-Fi → tap the ⓘ next to your network.")
+	tui.Info("Find the device IP in Settings → Wi-Fi.")
 
 	if cfg.Device.Host == "" {
 		s, err := tui.Prompt("device IP/host")
@@ -156,6 +156,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 
 			cfg.Device.Auth.KeyPath = strings.TrimSpace(p)
 		}
+
 		if cfg.Device.Auth.KeyPassphrase == "" {
 			pass, err := tui.PromptPassword("key passphrase (leave empty if unencrypted)")
 			if err != nil {
@@ -164,6 +165,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 
 			cfg.Device.Auth.KeyPassphrase = pass
 		}
+
 		if cfg.Device.Auth.Password == "" && cfg.Device.User != "root" {
 			pw, err := tui.PromptPassword("sudo password (leave empty if not needed)")
 			if err != nil {
@@ -175,7 +177,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 
 	default:
 		if cfg.Device.Auth.Password == "" {
-			pw, err := tui.PromptPassword("device's SSH password")
+			pw, err := tui.PromptPassword("device SSH password")
 			if err != nil {
 				return
 			}
