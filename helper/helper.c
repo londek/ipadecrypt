@@ -1,18 +1,29 @@
-// ipadecrypt-helper: on-device FairPlay decrypter using posix_spawn +
-// task_for_pid + mach_vm_read (TrollDecryptJB's technique).
+// ipadecrypt-helper-arm64
 //
-// Rationale: mremap_encrypted from an arbitrary userland process returns EPERM
-// on iOS 16 - the kernel won't hand over FairPlay keys to a process that
-// isn't the target app. Running the app itself with POSIX_SPAWN_START_SUSPENDED
-// maps its __TEXT into a task with the right crypto context; a root-privileged
-// observer with task_for_pid can then mach_vm_read those pages and the kernel
-// decrypts them on-demand inside the page-fault handler. This works even for
-// apps that would crash at dyld bind (e.g. iOS-17 app on an iOS-16 device),
-// because we never actually resume the suspended task.
+// On-device FairPlay decrypter. Launches a target .app bundle suspended,
+// reads its cryptoff pages via mach_vm_read_overwrite (kernel decrypts on
+// page fault), and writes a decrypted IPA. Does the same for every
+// PlugIns/*.appex and Extensions/*.appex in the bundle.
 //
-// Subcommands:
-//   helper find <app-dir-name>      → scan install container dir, print path
-//   helper [-v] <bundle> <out-ipa>  → decrypt bundle, produce IPA
+// CLI: ipadecrypt-helper-arm64 <bundle-id> <bundle-src> <out-ipa>
+//   bundle-id  — CFBundleIdentifier of the main app, or "" to skip the main
+//                app pass. Used for SpringBoard's SBSLaunch SPI which is the
+//                only way to spawn cross-OS binaries on Dopamine.
+//   bundle-src — absolute path to the installed .app on disk
+//   out-ipa    — absolute path to write the decrypted IPA to
+//
+// Spawn-path selection (best-to-worst AMFI tolerance):
+//   1. SBSLaunchApplicationWithIdentifier(bundle-id, suspended=1)
+//      SpringBoard spawns the target for us. Its process is CS_PLATFORM_BINARY
+//      so its posix_spawn satisfies AMFI's minOS check even for iOS-18/26
+//      binaries on iOS-16. Only works when bundle-id is registered with
+//      LaunchServices — main apps only; appexes return kSBSError(7).
+//   2. posix_spawn(POSIX_SPAWN_START_SUSPENDED)
+//      Works for same-OS binaries; Dopamine AMFI SIGKILLs cross-OS ones in
+//      kernel before we get back the task port.
+//   3. fork() + ptrace(PT_TRACE_ME) + execve()
+//      Sets P_TRACED before exec; AMFI treats it as under-debug and skips the
+//      minOS check. Resumes via PT_CONTINUE rather than task_resume.
 
 #include <stdarg.h>
 #include <stddef.h>
@@ -23,7 +34,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <dirent.h>
-#include <libgen.h>
+#include <dlfcn.h>
 #include <signal.h>
 #include <spawn.h>
 #include <sys/mman.h>
@@ -37,23 +48,32 @@
 #include <mach/vm_region.h>
 #include <mach/exception_types.h>
 #include <mach/thread_status.h>
-#include <CommonCrypto/CommonDigest.h>
 
-// mach_vm.h is marked "unsupported" in the iOS SDK but the syscalls exist at
-// runtime. Forward-declare the ones we use, matching the declarations in
-// TrollDecryptJB/TDDumpDecrypted.m:54-58.
+// ----- SDK-missing SPI forward decls -----------------------------------
+
+// mach_vm is "unsupported" in iOS SDK headers; syscalls exist at runtime.
 typedef uint64_t mach_vm_address_t;
 typedef uint64_t mach_vm_size_t;
-typedef uint64_t mach_vm_offset_t;
+extern kern_return_t mach_vm_read_overwrite(vm_map_t, mach_vm_address_t,
+    mach_vm_size_t, mach_vm_address_t, mach_vm_size_t *);
+extern kern_return_t mach_vm_region(vm_map_t, mach_vm_address_t *,
+    mach_vm_size_t *, vm_region_flavor_t, vm_region_info_t,
+    mach_msg_type_number_t *, mach_port_t *);
 
-extern kern_return_t mach_vm_read_overwrite(vm_map_t target_task,
-    mach_vm_address_t address, mach_vm_size_t size,
-    mach_vm_address_t data, mach_vm_size_t *outsize);
+// libproc SPI — not in iOS SDK.
+extern int proc_listallpids(void *, int);
+extern int proc_pidpath(int, void *, uint32_t);
 
-extern kern_return_t mach_vm_region(vm_map_t target_task,
-    mach_vm_address_t *address, mach_vm_size_t *size,
-    vm_region_flavor_t flavor, vm_region_info_t info,
-    mach_msg_type_number_t *infoCnt, mach_port_t *object_name);
+// ptrace — sys/ptrace.h is iOS-hidden. We only need these two requests.
+#ifndef PT_TRACE_ME
+#define PT_TRACE_ME 0
+#endif
+#ifndef PT_CONTINUE
+#define PT_CONTINUE 7
+#endif
+extern int ptrace(int request, pid_t pid, void *addr, int data);
+
+extern char **environ;
 
 #ifndef LC_ENCRYPTION_INFO
 #define LC_ENCRYPTION_INFO 0x21
@@ -62,106 +82,22 @@ extern kern_return_t mach_vm_region(vm_map_t target_task,
 #define LC_ENCRYPTION_INFO_64 0x2C
 #endif
 
-extern char **environ;
+// ----- logging ---------------------------------------------------------
 
-static int verbose = 0;
-static int events  = 0; // emit machine-readable @evt lines
-#define LOG(...) do { if (verbose) fprintf(stderr, __VA_ARGS__); } while (0)
-#define ERR(...) do { fprintf(stderr, "[helper] " __VA_ARGS__); fputc('\n', stderr); } while (0)
+static int g_verbose = 0;
 
-// EVT emits a single `@evt key=value …\n` line to stderr when -e is set.
-// Callers pass the attribute list (without leading "@evt ").
-__attribute__((format(printf, 1, 2)))
-static void EVT(const char *fmt, ...) {
-    if (!events) return;
-    fprintf(stderr, "@evt ");
-    va_list ap; va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
-    va_end(ap);
-    fputc('\n', stderr);
-    fflush(stderr);
-}
+#define LOG(...) do { if (g_verbose) fprintf(stderr, __VA_ARGS__); } while (0)
+#define ERR(fmt, ...) fprintf(stderr, "[helper] ERROR: " fmt "\n", ##__VA_ARGS__)
+#define EVT(fmt, ...) do { fprintf(stdout, "@evt " fmt "\n", ##__VA_ARGS__); fflush(stdout); } while (0)
 
-// ----- bundle install-dir find subcommand ------------------------------
+// ----- Mach-O encryption info parsing ---------------------------------
 
-static int find_app_dir(const char *app_dir_name) {
-    const char *root = "/var/containers/Bundle/Application";
-    DIR *d = opendir(root);
-    if (!d) {
-        ERR("opendir %s: %s", root, strerror(errno));
-        return 2;
-    }
-    struct dirent *de;
-    int rc = 1;
-    int scanned = 0;
-    while ((de = readdir(d)) != NULL) {
-        if (de->d_name[0] == '.') continue;
-        scanned++;
-        char candidate[4096];
-        snprintf(candidate, sizeof(candidate), "%s/%s/%s", root, de->d_name, app_dir_name);
-        struct stat st;
-        if (stat(candidate, &st) == 0 && S_ISDIR(st.st_mode)) {
-            printf("%s\n", candidate);
-            rc = 0;
-            break;
-        }
-    }
-    closedir(d);
-    if (rc != 0) {
-        fprintf(stderr, "[helper] find: scanned %d UUID dirs under %s; %s not present\n",
-                scanned, root, app_dir_name);
-    }
-    return rc;
-}
-
-// ----- sha256 subcommand -----------------------------------------------
-
-// sha256_file streams `path` through CommonCrypto's SHA-256 and prints the
-// digest as lowercase hex on stdout. Used to cheaply verify that an already-
-// installed bundle still matches the IPA we were going to upload.
-static int sha256_file(const char *path) {
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) {
-        fprintf(stderr, "[helper] open %s: %s\n", path, strerror(errno));
-        return 1;
-    }
-    CC_SHA256_CTX ctx;
-    CC_SHA256_Init(&ctx);
-    uint8_t buf[65536];
-    for (;;) {
-        ssize_t n = read(fd, buf, sizeof(buf));
-        if (n == 0) break;
-        if (n < 0) {
-            fprintf(stderr, "[helper] read %s: %s\n", path, strerror(errno));
-            close(fd);
-            return 1;
-        }
-        CC_SHA256_Update(&ctx, buf, (CC_LONG)n);
-    }
-    close(fd);
-    uint8_t digest[CC_SHA256_DIGEST_LENGTH];
-    CC_SHA256_Final(digest, &ctx);
-    for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; i++) printf("%02x", digest[i]);
-    printf("\n");
-    return 0;
-}
-
-// ----- Mach-O / encryption-info parsing on local files -----------------
-
-// Info about an encrypted slice within a (thin or fat) Mach-O.
-// We support only thin arm64/arm64e binaries for the spawn path - the kernel
-// will pick the right slice itself when it loads the fat executable, but our
-// in-memory patching below still needs to know which slice it was. For iOS,
-// nearly all app binaries are thin arm64/arm64e.
 typedef struct {
-    int is_64;
-    off_t slice_offset;       // byte offset in file where this slice starts
-    uint32_t cryptoff;        // within slice
+    off_t slice_offset;             // offset within file (thin: 0, fat: slice start)
+    uint32_t cryptoff;              // offset from slice start to encrypted pages
     uint32_t cryptsize;
-    uint32_t cryptid;
-    uint32_t cputype;
-    uint32_t cpusubtype;
-    off_t cryptid_file_offset; // absolute byte offset of cryptid in file
+    uint32_t cputype, cpusubtype;
+    off_t cryptid_file_offset;      // absolute byte offset of cryptid field in file
 } encinfo_t;
 
 static uint32_t bswap32(uint32_t x) {
@@ -169,59 +105,49 @@ static uint32_t bswap32(uint32_t x) {
            ((x & 0xff0000) >> 8) | ((x & 0xff000000) >> 24);
 }
 
-// Parse a single slice and fill `out` if it has an LC_ENCRYPTION_INFO[_64]
-// with cryptid != 0. Returns 1 if encrypted, 0 if unencrypted/no header, <0 on error.
+// Fill `out` for the first slice with LC_ENCRYPTION_INFO{_64} cryptid != 0.
+// Returns 1 encrypted, 0 not encrypted / not Mach-O, -1 on error.
 static int parse_slice(const uint8_t *slice, size_t slice_len, off_t slice_off, encinfo_t *out) {
     if (slice_len < sizeof(struct mach_header)) return 0;
-    struct mach_header mh_common;
-    memcpy(&mh_common, slice, sizeof(mh_common));
+    struct mach_header mh;
+    memcpy(&mh, slice, sizeof(mh));
 
     int is_64;
-    uint32_t ncmds, sizeofcmds;
-    size_t header_sz;
-    uint32_t cputype, cpusubtype;
-    if (mh_common.magic == MH_MAGIC_64) {
+    size_t hdr_sz;
+    uint32_t ncmds, szcmds;
+    if (mh.magic == MH_MAGIC_64) {
         struct mach_header_64 mh64;
         memcpy(&mh64, slice, sizeof(mh64));
         is_64 = 1;
-        ncmds = mh64.ncmds;
-        sizeofcmds = mh64.sizeofcmds;
-        cputype = mh64.cputype;
-        cpusubtype = mh64.cpusubtype;
-        header_sz = sizeof(mh64);
-    } else if (mh_common.magic == MH_MAGIC) {
+        ncmds = mh64.ncmds; szcmds = mh64.sizeofcmds; hdr_sz = sizeof(mh64);
+        out->cputype = mh64.cputype; out->cpusubtype = mh64.cpusubtype;
+    } else if (mh.magic == MH_MAGIC) {
         is_64 = 0;
-        ncmds = mh_common.ncmds;
-        sizeofcmds = mh_common.sizeofcmds;
-        cputype = mh_common.cputype;
-        cpusubtype = mh_common.cpusubtype;
-        header_sz = sizeof(mh_common);
+        ncmds = mh.ncmds; szcmds = mh.sizeofcmds; hdr_sz = sizeof(mh);
+        out->cputype = mh.cputype; out->cpusubtype = mh.cpusubtype;
     } else {
         return 0;
     }
-    if (header_sz + sizeofcmds > slice_len) return -1;
+    if (hdr_sz + szcmds > slice_len) return -1;
 
-    const uint8_t *lc_ptr = slice + header_sz;
+    const uint8_t *lc_ptr = slice + hdr_sz;
     for (uint32_t i = 0; i < ncmds; i++) {
         struct load_command lc;
         memcpy(&lc, lc_ptr, sizeof(lc));
         if (lc.cmdsize == 0) return -1;
-        if ((size_t)((lc_ptr - slice) + lc.cmdsize) > header_sz + sizeofcmds) return -1;
+        if ((size_t)((lc_ptr - slice) + lc.cmdsize) > hdr_sz + szcmds) return -1;
 
-        if ((is_64 && lc.cmd == LC_ENCRYPTION_INFO_64) ||
-            (!is_64 && lc.cmd == LC_ENCRYPTION_INFO)) {
+        int want = (is_64 && lc.cmd == LC_ENCRYPTION_INFO_64) ||
+                   (!is_64 && lc.cmd == LC_ENCRYPTION_INFO);
+        if (want) {
             struct encryption_info_command eic;
             memcpy(&eic, lc_ptr, sizeof(eic));
             if (eic.cryptid == 0) return 0;
-            out->is_64 = is_64;
             out->slice_offset = slice_off;
             out->cryptoff = eic.cryptoff;
             out->cryptsize = eic.cryptsize;
-            out->cryptid = eic.cryptid;
-            out->cputype = cputype;
-            out->cpusubtype = cpusubtype;
             out->cryptid_file_offset = slice_off + (lc_ptr - slice) +
-                                       offsetof(struct encryption_info_command, cryptid);
+                offsetof(struct encryption_info_command, cryptid);
             return 1;
         }
         lc_ptr += lc.cmdsize;
@@ -229,9 +155,8 @@ static int parse_slice(const uint8_t *slice, size_t slice_len, off_t slice_off, 
     return 0;
 }
 
-// Parse a Mach-O file (thin or fat). Returns 1 if encrypted (fills *out with
-// first encrypted slice info), 0 if not encrypted / not Mach-O, <0 on error.
-static int parse_macho_file(const char *path, encinfo_t *out) {
+// Parse Mach-O (thin or fat) at path. Returns same as parse_slice.
+static int parse_macho(const char *path, encinfo_t *out) {
     int fd = open(path, O_RDONLY);
     if (fd < 0) return -1;
     struct stat st;
@@ -241,14 +166,12 @@ static int parse_macho_file(const char *path, encinfo_t *out) {
     if (map == MAP_FAILED) return -1;
 
     int rc = 0;
-    uint8_t *base = (uint8_t *)map;
+    const uint8_t *base = map;
     if ((size_t)st.st_size >= 4) {
-        uint32_t magic;
-        memcpy(&magic, base, 4);
+        uint32_t magic; memcpy(&magic, base, 4);
         if (magic == FAT_CIGAM || magic == FAT_MAGIC) {
             int swap = (magic == FAT_CIGAM);
-            struct fat_header fh;
-            memcpy(&fh, base, sizeof(fh));
+            struct fat_header fh; memcpy(&fh, base, sizeof(fh));
             uint32_t nfat = swap ? bswap32(fh.nfat_arch) : fh.nfat_arch;
             for (uint32_t i = 0; i < nfat; i++) {
                 struct fat_arch fa;
@@ -268,63 +191,243 @@ static int parse_macho_file(const char *path, encinfo_t *out) {
     return rc;
 }
 
-static int is_macho_file(const char *path) {
+static int is_macho(const char *path) {
     int fd = open(path, O_RDONLY);
     if (fd < 0) return 0;
     uint32_t m = 0;
     ssize_t n = read(fd, &m, sizeof(m));
     close(fd);
-    if (n != sizeof(m)) return 0;
-    return (m == MH_MAGIC || m == MH_MAGIC_64 || m == FAT_CIGAM || m == FAT_MAGIC);
+    return n == sizeof(m) &&
+        (m == MH_MAGIC || m == MH_MAGIC_64 || m == FAT_CIGAM || m == FAT_MAGIC);
 }
 
-// ----- target-task image discovery -------------------------------------
+// ----- filesystem helpers ---------------------------------------------
 
-// Find the main executable's Mach-O base address in the target task by
-// walking VM regions looking for an MH_EXECUTE Mach-O header.
-static int find_main_exec_base(task_t task, mach_vm_address_t *out_base) {
-    mach_vm_address_t addr = 0;
-    for (;;) {
-        mach_vm_size_t sz = 0;
-        vm_region_basic_info_data_64_t info;
-        mach_msg_type_number_t info_cnt = VM_REGION_BASIC_INFO_COUNT_64;
-        mach_port_t obj_name = MACH_PORT_NULL;
-        kern_return_t kr = mach_vm_region(task, &addr, &sz,
-                                          VM_REGION_BASIC_INFO_64,
-                                          (vm_region_info_t)&info, &info_cnt, &obj_name);
-        if (kr != KERN_SUCCESS) return -1;
-
-        struct mach_header_64 hdr;
-        mach_vm_size_t n = 0;
-        kr = mach_vm_read_overwrite(task, addr, sizeof(hdr),
-                                    (mach_vm_address_t)(uintptr_t)&hdr, &n);
-        if (kr == KERN_SUCCESS && n == sizeof(hdr) &&
-            (hdr.magic == MH_MAGIC_64 || hdr.magic == MH_MAGIC) &&
-            hdr.filetype == MH_EXECUTE) {
-            *out_base = addr;
-            return 0;
+// mkdir -p for absolute paths.
+static int mkdirs(const char *path) {
+    char buf[4096];
+    strncpy(buf, path, sizeof(buf) - 1); buf[sizeof(buf) - 1] = '\0';
+    for (char *p = buf + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(buf, 0755);
+            *p = '/';
         }
-        addr += sz;
     }
+    mkdir(buf, 0755);
+    return 0;
 }
 
-// ----- decrypt flow ----------------------------------------------------
+static int rm_rf(const char *path) {
+    struct stat st;
+    if (lstat(path, &st) != 0) return 0;
+    if (S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode)) {
+        DIR *d = opendir(path);
+        if (d) {
+            struct dirent *e;
+            while ((e = readdir(d))) {
+                if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+                char sub[4096];
+                snprintf(sub, sizeof(sub), "%s/%s", path, e->d_name);
+                rm_rf(sub);
+            }
+            closedir(d);
+        }
+        return rmdir(path);
+    }
+    return unlink(path);
+}
 
-// Spawn exec_path with SPAWN_START_SUSPENDED, return pid + task port. The
-// Attempt the posix_spawn once with the given flags. Returns 0 on success,
-// or the errno value on failure. On success *out_pid is filled.
-static int do_spawn(const char *exec_path, pid_t *out_pid) {
+static int copy_file(const char *src, const char *dst) {
+    int in = open(src, O_RDONLY);
+    if (in < 0) return -1;
+    struct stat st;
+    if (fstat(in, &st) != 0) { close(in); return -1; }
+    int out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, st.st_mode & 0777);
+    if (out < 0) { close(in); return -1; }
+    char buf[64 * 1024];
+    ssize_t n;
+    while ((n = read(in, buf, sizeof(buf))) > 0) {
+        if (write(out, buf, n) != n) { close(in); close(out); return -1; }
+    }
+    close(in); close(out);
+    return n < 0 ? -1 : 0;
+}
+
+static int copy_tree(const char *src, const char *dst) {
+    struct stat st;
+    if (lstat(src, &st) != 0) return -1;
+    if (S_ISLNK(st.st_mode)) {
+        char target[4096];
+        ssize_t n = readlink(src, target, sizeof(target) - 1);
+        if (n < 0) return -1;
+        target[n] = '\0';
+        return symlink(target, dst) == 0 ? 0 : -1;
+    }
+    if (S_ISDIR(st.st_mode)) {
+        mkdir(dst, st.st_mode & 0777);
+        DIR *d = opendir(src);
+        if (!d) return -1;
+        struct dirent *e;
+        int rc = 0;
+        while ((e = readdir(d))) {
+            if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+            char s[4096], t[4096];
+            snprintf(s, sizeof(s), "%s/%s", src, e->d_name);
+            snprintf(t, sizeof(t), "%s/%s", dst, e->d_name);
+            if (copy_tree(s, t) != 0) rc = -1;
+        }
+        closedir(d);
+        return rc;
+    }
+    return copy_file(src, dst);
+}
+
+// ----- libjailbreak bridge (Dopamine trustcache) ----------------------
+
+static int (*g_trust_file_by_path)(const char *) = NULL;
+
+static void load_libjailbreak(void) {
+    static int tried = 0;
+    if (tried) return;
+    tried = 1;
+    void *h = dlopen("/var/jb/basebin/libjailbreak.dylib", RTLD_NOW);
+    if (!h) {
+        LOG("[helper] libjailbreak unavailable: %s\n", dlerror());
+        return;
+    }
+    g_trust_file_by_path = dlsym(h, "jbclient_trust_file_by_path");
+}
+
+// Walk bundle, trust-cache every Mach-O. Cross-OS frameworks need this to
+// survive AMFI library_validation when dyld maps them in the target.
+static void trust_walk(const char *root) {
+    load_libjailbreak();
+    if (!g_trust_file_by_path) return;
+    DIR *d = opendir(root);
+    if (!d) return;
+    struct dirent *e;
+    int n = 0;
+    while ((e = readdir(d))) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+        char p[4096]; snprintf(p, sizeof(p), "%s/%s", root, e->d_name);
+        struct stat st;
+        if (lstat(p, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) {
+            trust_walk(p);
+        } else if (S_ISREG(st.st_mode) && is_macho(p)) {
+            if (g_trust_file_by_path(p) == 0) n++;
+        }
+    }
+    closedir(d);
+    if (n > 0) LOG("[helper] trusted %d file(s) under %s\n", n, root);
+}
+
+// ----- SBS launch (via dlopen to avoid build-time framework link) -----
+
+// SDK Dockerfile drops System/Library/Frameworks. dlopen CoreFoundation +
+// SpringBoardServices at runtime so we don't need -framework flags.
+
+typedef const void *cf_string_t;
+typedef const void *cf_type_t;
+static cf_string_t (*CFStringCreateWithCString_)(void *, const char *, unsigned) = NULL;
+static void (*CFRelease_)(cf_type_t) = NULL;
+static int (*SBSLaunch_)(cf_string_t, unsigned char) = NULL;
+
+static int load_sbs(void) {
+    static int tried = 0;
+    if (tried) return SBSLaunch_ ? 0 : -1;
+    tried = 1;
+    void *cf = dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", RTLD_NOW);
+    void *sbs = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_NOW);
+    if (!cf || !sbs) {
+        LOG("[helper] SBS unavailable (cf=%p sbs=%p)\n", cf, sbs);
+        return -1;
+    }
+    CFStringCreateWithCString_ = dlsym(cf, "CFStringCreateWithCString");
+    CFRelease_ = dlsym(cf, "CFRelease");
+    SBSLaunch_ = dlsym(sbs, "SBSLaunchApplicationWithIdentifier");
+    if (!CFStringCreateWithCString_ || !CFRelease_ || !SBSLaunch_) {
+        LOG("[helper] SBS missing symbols\n");
+        return -1;
+    }
+    return 0;
+}
+
+// Tolerate proc_pidpath's /private prefix when comparing to input paths.
+static int path_equiv(const char *a, const char *b) {
+    if (strcmp(a, b) == 0) return 1;
+    const char *pre = "/private";
+    size_t plen = strlen(pre);
+    if (strncmp(a, pre, plen) == 0 && strcmp(a + plen, b) == 0) return 1;
+    if (strncmp(b, pre, plen) == 0 && strcmp(b + plen, a) == 0) return 1;
+    return 0;
+}
+
+static pid_t find_pid_by_path(const char *exec_path, int ms_budget) {
+    for (int slept = 0; slept < ms_budget; slept += 50) {
+        int n = proc_listallpids(NULL, 0);
+        if (n <= 0) { usleep(50 * 1000); continue; }
+        pid_t *buf = malloc(n * sizeof(pid_t));
+        if (!buf) return 0;
+        int got = proc_listallpids(buf, n * sizeof(pid_t)) / sizeof(pid_t);
+        for (int i = 0; i < got; i++) {
+            char p[4096];
+            if (proc_pidpath(buf[i], p, sizeof(p)) > 0 && path_equiv(p, exec_path)) {
+                pid_t pid = buf[i];
+                free(buf);
+                return pid;
+            }
+        }
+        free(buf);
+        usleep(50 * 1000);
+    }
+    return 0;
+}
+
+// Ask SpringBoard to launch bundle_id suspended. SpringBoard's posix_spawn
+// runs in its CS_PLATFORM_BINARY context, which is the only thing Dopamine's
+// unpatched AMFI lets through for cross-OS main binaries.
+static int sbs_launch(const char *bundle_id, const char *exec_path,
+                      pid_t *out_pid, task_t *out_task) {
+    if (load_sbs() != 0) return -1;
+    cf_string_t bid = CFStringCreateWithCString_(NULL, bundle_id, 0x08000100 /* kCFStringEncodingUTF8 */);
+    if (!bid) return -1;
+    int rc = SBSLaunch_(bid, 1 /* suspended */);
+    CFRelease_(bid);
+    if (rc != 0) {
+        LOG("[helper] SBSLaunch(%s)=%d\n", bundle_id, rc);
+        return -1;
+    }
+    pid_t pid = find_pid_by_path(exec_path, 4000);
+    if (pid == 0) { LOG("[helper] SBS launch did not produce a pid\n"); return -1; }
+    task_t task = MACH_PORT_NULL;
+    if (task_for_pid(mach_task_self(), pid, &task) != KERN_SUCCESS) {
+        LOG("[helper] task_for_pid(%d) after SBS failed\n", pid);
+        kill(pid, SIGKILL);
+        return -1;
+    }
+    // SBS's suspended:1 relies on xpcproxy's "not ready" signal, not a real
+    // task_suspend we can observe — by the time we grab the task, dyld may
+    // be running. Freeze it ourselves so the address space is stable.
+    task_suspend(task);
+    *out_pid = pid;
+    *out_task = task;
+    LOG("[helper] SBS spawned %s pid=%d\n", bundle_id, pid);
+    return 0;
+}
+
+// ----- posix_spawn + PT_TRACE_ME fallback -----------------------------
+
+static int do_posix_spawn(const char *exec_path, pid_t *out_pid) {
     posix_spawnattr_t attr;
     posix_spawnattr_init(&attr);
     posix_spawnattr_setflags(&attr, POSIX_SPAWN_START_SUSPENDED);
-
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
-    // Silence the target's stdout/stderr.
     posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
     posix_spawn_file_actions_addopen(&fa, 1, "/dev/null", O_WRONLY, 0);
     posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
-
     char *argv[] = { (char *)exec_path, NULL };
     pid_t pid = 0;
     int rc = posix_spawn(&pid, exec_path, &fa, &attr, argv, environ);
@@ -334,99 +437,226 @@ static int do_spawn(const char *exec_path, pid_t *out_pid) {
     return rc;
 }
 
-// caller must kill/deallocate on success.
-static int spawn_suspended(const char *exec_path, pid_t *out_pid, task_t *out_task) {
-    pid_t pid = 0;
-    int rc = do_spawn(exec_path, &pid);
+// Cross-OS fallback: fork, child PT_TRACE_ME + execve. P_TRACED is set in
+// proc BEFORE exec, so AMFI's post-exec check treats the child as
+// under-debug and skips the minOS SIGKILL.
+static int do_ptrace_spawn(const char *exec_path, pid_t *out_pid) {
+    pid_t pid = fork();
+    if (pid < 0) { ERR("fork: %s", strerror(errno)); return -1; }
+    if (pid == 0) {
+        if (ptrace(PT_TRACE_ME, 0, NULL, 0) != 0) _exit(127);
+        int dn = open("/dev/null", O_RDWR);
+        if (dn >= 0) { dup2(dn, 0); dup2(dn, 1); dup2(dn, 2); close(dn); }
+        char *argv[] = { (char *)exec_path, NULL };
+        execve(exec_path, argv, environ);
+        _exit(127);
+    }
+    int status;
+    pid_t w;
+    do { w = waitpid(pid, &status, WUNTRACED); } while (w < 0 && errno == EINTR);
+    if (w < 0 || WIFEXITED(status) || WIFSIGNALED(status)) {
+        ERR("child died during exec of %s (status=0x%x)", exec_path, status);
+        return -1;
+    }
+    *out_pid = pid;
+    return 0;
+}
 
-    // EACCES can mean "file not executable" (installed extension binaries
-    // sometimes ship without +x for mobile, since iOS normally launches
-    // them only through ExtensionKit) OR "AMFI denied the signature".
-    // Try chmod +x once and retry before concluding it's an AMFI issue.
-    if (rc == EACCES) {
-        struct stat st;
-        if (stat(exec_path, &st) == 0) {
-            mode_t want = st.st_mode | S_IXUSR | S_IXGRP | S_IXOTH;
-            if (want != st.st_mode) {
-                LOG("[helper] EACCES on %s (mode=%03o), chmod +x and retrying\n",
-                    exec_path, st.st_mode & 0777);
-                EVT("event=spawn_chmod path=\"%s\" old_mode=%o", exec_path, st.st_mode & 0777);
-                if (chmod(exec_path, want) == 0) {
-                    rc = do_spawn(exec_path, &pid);
-                } else {
-                    LOG("[helper] chmod %s: %s\n", exec_path, strerror(errno));
-                }
-            }
+// Some installed extensions ship mode 0644 because iOS loads them through
+// ExtensionKit rather than execve. posix_spawn / execve from our helper both
+// require +x, so stamp it on ahead of any spawn attempt. We run as root via
+// sudo so chmod is always allowed.
+static void ensure_executable(const char *path) {
+    struct stat st;
+    if (stat(path, &st) != 0) return;
+    mode_t want = st.st_mode | S_IXUSR | S_IXGRP | S_IXOTH;
+    if (want == st.st_mode) return;
+    if (chmod(path, want) == 0) {
+        EVT("event=spawn_chmod path=\"%s\" old_mode=%o", path, st.st_mode & 0777);
+    }
+}
+
+// Unified spawn. Returns 0 on success, fills out_pid/out_task. *out_ptrace
+// is set to 1 iff the PT_TRACE_ME fallback was taken; caller must resume
+// via PT_CONTINUE in that case.
+static int spawn_suspended(const char *bundle_id, const char *exec_path,
+                           pid_t *out_pid, task_t *out_task, int *out_ptrace) {
+    *out_ptrace = 0;
+    ensure_executable(exec_path);
+    if (bundle_id && bundle_id[0]) {
+        if (sbs_launch(bundle_id, exec_path, out_pid, out_task) == 0) {
+            return 0;
         }
+        EVT("event=spawn_path_fallback from=sbs exec=\"%s\"", exec_path);
     }
-
-    if (rc != 0) {
-        ERR("posix_spawn %s: %s", exec_path, strerror(rc));
-        return -1;
-    }
-
+    pid_t pid = 0;
     task_t task = MACH_PORT_NULL;
-    kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
-    if (kr != KERN_SUCCESS) {
-        ERR("task_for_pid(%d): %d (%s)", pid, kr, mach_error_string(kr));
-        kill(pid, SIGKILL);
-        return -1;
+    int rc = do_posix_spawn(exec_path, &pid);
+    kern_return_t kr = KERN_FAILURE;
+    if (rc == 0) kr = task_for_pid(mach_task_self(), pid, &task);
+    if (rc != 0 || kr != KERN_SUCCESS) {
+        if (rc == 0) kill(pid, SIGKILL);
+        LOG("[helper] posix_spawn=%d tfp=%d, trying PT_TRACE_ME\n", rc, kr);
+        EVT("event=spawn_path_fallback from=posix_spawn exec=\"%s\" posix_rc=%d tfp=%d",
+            exec_path, rc, kr);
+        if (do_ptrace_spawn(exec_path, &pid) != 0) return -1;
+        *out_ptrace = 1;
+        kr = task_for_pid(mach_task_self(), pid, &task);
+        if (kr != KERN_SUCCESS) {
+            ERR("task_for_pid(%d) after PT_TRACE_ME: %d", pid, kr);
+            kill(pid, SIGKILL);
+            return -1;
+        }
+        EVT("event=spawn_path path=ptrace exec=\"%s\"", exec_path);
     }
     *out_pid = pid;
     *out_task = task;
     return 0;
 }
 
-// Dump an encrypted Mach-O image at `image_base` in `task` back to disk.
-// Reads src_path, replaces the encrypted region with plaintext obtained via
-// mach_vm_read, zeroes cryptid, writes dst_path. Works for both the main
-// executable and loaded frameworks/dylibs.
-static int dump_image_region(const char *src_path, const char *dst_path,
-                             task_t task, mach_vm_address_t image_base,
-                             const encinfo_t *info) {
-    // Read src file to local buffer.
-    int fd = open(src_path, O_RDONLY);
-    if (fd < 0) { ERR("open %s: %s", src_path, strerror(errno)); return -1; }
+// ----- target-task image discovery ------------------------------------
+
+// Locate the main MH_EXECUTE base by walking VM regions.
+static int find_main_base(task_t task, mach_vm_address_t *out) {
+    mach_vm_address_t addr = 0;
+    for (;;) {
+        mach_vm_size_t sz = 0;
+        vm_region_basic_info_data_64_t info;
+        mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t obj = MACH_PORT_NULL;
+        if (mach_vm_region(task, &addr, &sz, VM_REGION_BASIC_INFO_64,
+                (vm_region_info_t)&info, &cnt, &obj) != KERN_SUCCESS) return -1;
+        struct mach_header_64 hdr;
+        mach_vm_size_t n = 0;
+        if (mach_vm_read_overwrite(task, addr, sizeof(hdr),
+                (mach_vm_address_t)(uintptr_t)&hdr, &n) == KERN_SUCCESS &&
+            n == sizeof(hdr) &&
+            (hdr.magic == MH_MAGIC_64 || hdr.magic == MH_MAGIC) &&
+            hdr.filetype == MH_EXECUTE) {
+            *out = addr;
+            return 0;
+        }
+        addr += sz;
+    }
+}
+
+// Enumerate images loaded in target via TASK_DYLD_INFO. Writes count of
+// images into *out_count and returns a heap-allocated infoArray + path
+// strings buffer (caller frees). Returns NULL on error.
+static struct dyld_image_info *list_images(task_t task, uint32_t *out_count,
+                                            char **out_paths) {
+    struct task_dyld_info tdi;
+    mach_msg_type_number_t cnt = TASK_DYLD_INFO_COUNT;
+    if (task_info(task, TASK_DYLD_INFO, (task_info_t)&tdi, &cnt) != KERN_SUCCESS)
+        return NULL;
+    struct dyld_all_image_infos aii;
+    mach_vm_size_t n = 0;
+    if (mach_vm_read_overwrite(task, tdi.all_image_info_addr, sizeof(aii),
+            (mach_vm_address_t)(uintptr_t)&aii, &n) != KERN_SUCCESS) return NULL;
+    if (aii.infoArrayCount == 0 || aii.infoArray == NULL) return NULL;
+
+    size_t arr_sz = sizeof(struct dyld_image_info) * aii.infoArrayCount;
+    struct dyld_image_info *infos = malloc(arr_sz);
+    if (!infos) return NULL;
+    if (mach_vm_read_overwrite(task, (mach_vm_address_t)aii.infoArray, arr_sz,
+            (mach_vm_address_t)(uintptr_t)infos, &n) != KERN_SUCCESS) {
+        free(infos); return NULL;
+    }
+
+    // Read each image's path into one big buffer; rewrite imageFilePath to
+    // point inside it so the caller can use pointers directly.
+    size_t path_cap = aii.infoArrayCount * 4096;
+    char *paths = malloc(path_cap);
+    if (!paths) { free(infos); return NULL; }
+    size_t off = 0;
+    for (uint32_t i = 0; i < aii.infoArrayCount; i++) {
+        char *slot = paths + off;
+        if (off + 4096 > path_cap) { infos[i].imageFilePath = NULL; continue; }
+        mach_vm_size_t got = 0;
+        if (mach_vm_read_overwrite(task, (mach_vm_address_t)infos[i].imageFilePath,
+                4095, (mach_vm_address_t)(uintptr_t)slot, &got) == KERN_SUCCESS && got > 0) {
+            slot[got < 4095 ? got : 4094] = '\0';
+            // Re-terminate defensively at first NUL we already got.
+            size_t len = strnlen(slot, got);
+            slot[len] = '\0';
+            infos[i].imageFilePath = slot;
+            off += len + 1;
+        } else {
+            infos[i].imageFilePath = NULL;
+        }
+    }
+    *out_count = aii.infoArrayCount;
+    *out_paths = paths;
+    return infos;
+}
+
+// ----- dump an encrypted image ----------------------------------------
+
+// Read cryptsize bytes at image_base+cryptoff from target, splice onto a
+// copy of the source file's bytes, zero cryptid, write to dst.
+static int dump_image(const char *src, const char *dst, task_t task,
+                      mach_vm_address_t image_base, const encinfo_t *info) {
+    int fd = open(src, O_RDONLY);
+    if (fd < 0) { ERR("open %s: %s", src, strerror(errno)); return -1; }
     struct stat st;
-    fstat(fd, &st);
+    if (fstat(fd, &st) != 0) { close(fd); return -1; }
     uint8_t *buf = malloc(st.st_size);
+    if (!buf) { close(fd); return -1; }
     if (read(fd, buf, st.st_size) != st.st_size) {
-        free(buf); close(fd); ERR("read %s: %s", src_path, strerror(errno));
-        return -1;
+        ERR("read %s: %s", src, strerror(errno));
+        free(buf); close(fd); return -1;
     }
     close(fd);
 
-    // For thin binaries slice_offset is 0 so target vmaddr cryptoff maps
-    // 1:1 to file byte offset. Kernel faults + decrypts the encrypted pages
-    // on demand during the read.
+    // Read decrypted pages from the target task, splice over the encrypted
+    // bytes in the file-image buffer.
     mach_vm_address_t src_addr = image_base + info->cryptoff;
     mach_vm_address_t dst_addr = (mach_vm_address_t)(uintptr_t)(buf + info->slice_offset + info->cryptoff);
     mach_vm_size_t remaining = info->cryptsize;
     while (remaining > 0) {
-        mach_vm_size_t chunk = remaining;
-        if (chunk > 0x100000) chunk = 0x100000;
-        mach_vm_size_t nread = 0;
-        kern_return_t kr = mach_vm_read_overwrite(task, src_addr, chunk, dst_addr, &nread);
-        if (kr != KERN_SUCCESS) {
-            ERR("mach_vm_read_overwrite @0x%llx size=0x%llx: kr=%d (%s)",
-                (unsigned long long)src_addr, (unsigned long long)chunk,
-                kr, mach_error_string(kr));
-            free(buf);
-            return -1;
+        mach_vm_size_t chunk = remaining > 0x100000 ? 0x100000 : remaining;
+        mach_vm_size_t got = 0;
+        kern_return_t kr = mach_vm_read_overwrite(task, src_addr, chunk, dst_addr, &got);
+        if (kr != KERN_SUCCESS || got == 0) {
+            ERR("mach_vm_read @0x%llx size=0x%llx kr=%d", src_addr, chunk, kr);
+            free(buf); return -1;
         }
-        if (nread == 0) { ERR("mach_vm_read returned 0 bytes"); free(buf); return -1; }
-        src_addr += nread;
-        dst_addr += nread;
-        remaining -= nread;
+        src_addr += got; dst_addr += got; remaining -= got;
+    }
+    // Sanity: scan the whole cryptoff region. If every byte is zero the
+    // cryptoff pages were never page-faulted by the target (kernel returned
+    // us the zero-filled backing store, not the decrypted content). Skip
+    // writing so the dst stays as the original encrypted file — user gets a
+    // cryptid=1 framework which at least surfaces the failure rather than a
+    // cryptid=0 with broken bytes.
+    {
+        const uint8_t *p = buf + info->slice_offset + info->cryptoff;
+        int nonzero = 0;
+        for (uint32_t k = 0; k < info->cryptsize; k++) {
+            if (p[k]) { nonzero = 1; break; }
+        }
+        if (!nonzero) {
+            ERR("cryptoff read all zeros for %s — target hadn't faulted the pages yet", src);
+            free(buf); return -1;
+        }
     }
 
+    // Patch cryptid to 0.
     uint32_t zero = 0;
     memcpy(buf + info->cryptid_file_offset, &zero, sizeof(zero));
 
-    int out = open(dst_path, O_CREAT | O_WRONLY | O_TRUNC, 0755);
-    if (out < 0) { ERR("open dst %s: %s", dst_path, strerror(errno)); free(buf); return -1; }
+    mkdirs(dst); // no-op if parent exists; creates parent if not
+    // mkdirs above actually mkdirs the file path as a dir — fix by doing
+    // parent only:
+    char parent[4096];
+    snprintf(parent, sizeof(parent), "%s", dst);
+    char *slash = strrchr(parent, '/');
+    if (slash) { *slash = '\0'; mkdirs(parent); }
+
+    int out = open(dst, O_CREAT | O_WRONLY | O_TRUNC, 0755);
+    if (out < 0) { ERR("open dst %s: %s", dst, strerror(errno)); free(buf); return -1; }
     if (write(out, buf, st.st_size) != st.st_size) {
-        ERR("write dst %s: %s", dst_path, strerror(errno));
+        ERR("write dst %s: %s", dst, strerror(errno));
         close(out); free(buf); return -1;
     }
     close(out);
@@ -434,612 +664,359 @@ static int dump_image_region(const char *src_path, const char *dst_path,
     return 0;
 }
 
-// Check whether a task is still alive by querying its basic info.
-static int task_alive(task_t task) {
-    struct task_basic_info tbi;
-    mach_msg_type_number_t cnt = TASK_BASIC_INFO_COUNT;
-    return task_info(task, TASK_BASIC_INFO, (task_info_t)&tbi, &cnt) == KERN_SUCCESS;
+// ----- dyld resume + exception-port watch -----------------------------
+
+// Set an exception port on target and return its receive right. Catches the
+// SIGABRT dyld fires when cross-OS bind-fails.
+static mach_port_t make_exception_port(task_t task) {
+    mach_port_t port = MACH_PORT_NULL;
+    if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port) != KERN_SUCCESS) return MACH_PORT_NULL;
+    mach_port_insert_right(mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND);
+    task_set_exception_ports(task,
+        EXC_MASK_CRASH | EXC_MASK_BAD_ACCESS | EXC_MASK_BAD_INSTRUCTION |
+        EXC_MASK_SOFTWARE | EXC_MASK_ARITHMETIC | EXC_MASK_BREAKPOINT,
+        port, EXCEPTION_DEFAULT, ARM_THREAD_STATE64);
+    return port;
 }
 
-// Read a NUL-terminated string from a target task, up to `max` bytes, into
-// `dst`. Returns 0 on success or -1 on mach_vm_read failure.
-static int read_cstr_from_task(task_t task, mach_vm_address_t addr, char *dst, size_t max) {
-    if (max == 0) return -1;
-    mach_vm_size_t n = 0;
-    kern_return_t kr = mach_vm_read_overwrite(task, addr, max - 1,
-        (mach_vm_address_t)(uintptr_t)dst, &n);
-    if (kr != KERN_SUCCESS) return -1;
-    dst[n] = 0;
-    // Truncate at first NUL we find.
-    for (size_t i = 0; i < n; i++) {
-        if (dst[i] == 0) { return 0; }
-    }
-    dst[max - 1] = 0;
-    return 0;
-}
-
-// Read the LC_ENCRYPTION_INFO[_64] out of the Mach-O at `image_base` in task.
-// Fills *info (slice_offset = 0 since in-memory thin image). Returns 1 if
-// encrypted (cryptid != 0), 0 if not, -1 on error.
-static int read_image_encinfo(task_t task, mach_vm_address_t image_base, encinfo_t *info) {
-    struct mach_header_64 hdr;
-    mach_vm_size_t n = 0;
-    kern_return_t kr = mach_vm_read_overwrite(task, image_base, sizeof(hdr),
-        (mach_vm_address_t)(uintptr_t)&hdr, &n);
-    if (kr != KERN_SUCCESS || n != sizeof(hdr)) return -1;
-
-    int is_64;
-    uint32_t ncmds, sizeofcmds;
-    size_t header_sz;
-    uint32_t cputype, cpusubtype;
-    if (hdr.magic == MH_MAGIC_64) {
-        is_64 = 1;
-        ncmds = hdr.ncmds; sizeofcmds = hdr.sizeofcmds;
-        cputype = hdr.cputype; cpusubtype = hdr.cpusubtype;
-        header_sz = sizeof(struct mach_header_64);
-    } else if (hdr.magic == MH_MAGIC) {
-        struct mach_header h32;
-        memcpy(&h32, &hdr, sizeof(h32));
-        is_64 = 0;
-        ncmds = h32.ncmds; sizeofcmds = h32.sizeofcmds;
-        cputype = h32.cputype; cpusubtype = h32.cpusubtype;
-        header_sz = sizeof(h32);
+// Resume target and wait up to `ms` for either a Mach exception (cross-OS
+// bind-fail abort) or timeout, then suspend the task so the caller has a
+// stable address space to walk.
+static void run_and_suspend(task_t task, pid_t pid, int via_ptrace,
+                             mach_port_t exc_port, int ms) {
+    if (via_ptrace) {
+        // PT_CONTINUE keeps the trace relationship; signals route to us via
+        // waitpid rather than Mach exception.
+        ptrace(PT_CONTINUE, pid, (void *)1, 0);
+        int waited = 0;
+        while (waited < ms) {
+            int st;
+            pid_t w = waitpid(pid, &st, WNOHANG | WUNTRACED);
+            if (w == pid) {
+                if (WIFEXITED(st) || WIFSIGNALED(st)) break;
+                if (WIFSTOPPED(st)) {
+                    int sig = WSTOPSIG(st);
+                    int deliver = (sig == SIGTRAP || sig == SIGSTOP) ? 0 : sig;
+                    ptrace(PT_CONTINUE, pid, (void *)1, deliver);
+                }
+            }
+            usleep(200 * 1000);
+            waited += 200;
+        }
     } else {
-        return -1;
-    }
-    if (sizeofcmds == 0 || sizeofcmds > 1 << 20) return -1;
-
-    uint8_t *cmds = malloc(sizeofcmds);
-    kr = mach_vm_read_overwrite(task, image_base + header_sz, sizeofcmds,
-        (mach_vm_address_t)(uintptr_t)cmds, &n);
-    if (kr != KERN_SUCCESS) { free(cmds); return -1; }
-
-    uint8_t *p = cmds;
-    int rc = 0;
-    for (uint32_t i = 0; i < ncmds; i++) {
-        struct load_command lc;
-        memcpy(&lc, p, sizeof(lc));
-        if (lc.cmdsize == 0 || (size_t)((p - cmds) + lc.cmdsize) > sizeofcmds) break;
-        if ((is_64 && lc.cmd == LC_ENCRYPTION_INFO_64) ||
-            (!is_64 && lc.cmd == LC_ENCRYPTION_INFO)) {
-            struct encryption_info_command eic;
-            memcpy(&eic, p, sizeof(eic));
-            if (eic.cryptid != 0) {
-                info->is_64 = is_64;
-                info->slice_offset = 0;
-                info->cryptoff = eic.cryptoff;
-                info->cryptsize = eic.cryptsize;
-                info->cryptid = eic.cryptid;
-                info->cputype = cputype;
-                info->cpusubtype = cpusubtype;
-                info->cryptid_file_offset = header_sz + (p - cmds) +
-                    offsetof(struct encryption_info_command, cryptid);
-                rc = 1;
-            }
-            break;
+        // SBS / posix_spawn leave the task with potentially multiple
+        // suspensions (task itself + runningboardd assertion). Drain until
+        // suspend count is 0 so threads actually run.
+        while (task_resume(task) == KERN_SUCCESS) { /* loop */ }
+        if (exc_port != MACH_PORT_NULL) {
+            struct { mach_msg_header_t hdr; char body[2048]; } msg;
+            memset(&msg, 0, sizeof(msg));
+            mach_msg_return_t mr = mach_msg(&msg.hdr,
+                MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(msg),
+                exc_port, ms, MACH_PORT_NULL);
+            LOG("[helper] mach_msg wait returned 0x%x\n", mr);
+        } else {
+            usleep(ms * 1000);
         }
-        p += lc.cmdsize;
     }
-    free(cmds);
-    return rc;
+    task_suspend(task);
 }
 
-// ----- bundle copy ----------------------------------------------------
+// ----- decrypt one bundle ---------------------------------------------
 
-// Copy a plain file.
-static int copy_file(const char *src, const char *dst, mode_t mode) {
-    int in = open(src, O_RDONLY);
-    if (in < 0) return -1;
-    int out = open(dst, O_CREAT | O_WRONLY | O_TRUNC, mode);
-    if (out < 0) { close(in); return -1; }
-    char buf[65536];
-    ssize_t n;
-    while ((n = read(in, buf, sizeof(buf))) > 0) {
-        if (write(out, buf, n) != n) { close(in); close(out); return -1; }
-    }
-    close(in); close(out);
-    return 0;
-}
-
-// The recursive walker: copies everything verbatim. Encrypted Mach-Os
-// (main exec + any encrypted frameworks) get patched in-place afterwards
-// via mach_vm_read from the target task.
-static int copy_tree(const char *src_root, const char *dst_root, const char *rel) {
-    char src_path[4096], dst_path[4096];
-    snprintf(src_path, sizeof(src_path), "%s%s%s", src_root, rel[0] ? "/" : "", rel);
-    snprintf(dst_path, sizeof(dst_path), "%s%s%s", dst_root, rel[0] ? "/" : "", rel);
-
-    struct stat st;
-    if (lstat(src_path, &st) < 0) { ERR("lstat %s: %s", src_path, strerror(errno)); return -1; }
-
-    if (S_ISDIR(st.st_mode)) {
-        if (mkdir(dst_path, 0755) < 0 && errno != EEXIST) {
-            ERR("mkdir %s: %s", dst_path, strerror(errno));
-            return -1;
-        }
-        DIR *d = opendir(src_path);
-        if (!d) { ERR("opendir %s: %s", src_path, strerror(errno)); return -1; }
-        struct dirent *de;
-        while ((de = readdir(d)) != NULL) {
-            if (de->d_name[0] == '.' && (de->d_name[1] == 0 ||
-                (de->d_name[1] == '.' && de->d_name[2] == 0))) continue;
-            char child_rel[4096];
-            snprintf(child_rel, sizeof(child_rel), "%s%s%s", rel, rel[0] ? "/" : "", de->d_name);
-            if (copy_tree(src_root, dst_root, child_rel) != 0) {
-                closedir(d);
-                return -1;
-            }
-        }
-        closedir(d);
+// Find main executable name from CFBundleExecutable in Info.plist, or fall
+// back to "the single Mach-O file whose name matches the bundle dir sans
+// .app/.appex suffix" heuristic. We avoid parsing plist here — plist format
+// varies (XML vs binary) — and use the heuristic as a simple, robust enough
+// alternative.
+static int find_main_name(const char *bundle, char *out, size_t cap) {
+    // Heuristic: try the bundle basename sans trailing .app/.appex; verify
+    // it's a Mach-O. If not, scan for any Mach-O file at the bundle root.
+    char base[1024];
+    strncpy(base, bundle, sizeof(base) - 1); base[sizeof(base) - 1] = '\0';
+    char *slash = strrchr(base, '/');
+    const char *name = slash ? slash + 1 : base;
+    char cand[4096];
+    snprintf(cand, sizeof(cand), "%s/%s", bundle, name);
+    char *dot = strrchr(cand, '.');
+    if (dot && (strcmp(dot, ".app") == 0 || strcmp(dot, ".appex") == 0)) *dot = '\0';
+    if (is_macho(cand)) {
+        const char *bn = strrchr(cand, '/'); bn = bn ? bn + 1 : cand;
+        strncpy(out, bn, cap - 1); out[cap - 1] = '\0';
         return 0;
     }
-    if (S_ISLNK(st.st_mode)) {
-        char target[4096];
-        ssize_t n = readlink(src_path, target, sizeof(target) - 1);
-        if (n < 0) { ERR("readlink %s: %s", src_path, strerror(errno)); return -1; }
-        target[n] = 0;
-        if (symlink(target, dst_path) < 0 && errno != EEXIST) {
-            ERR("symlink %s: %s", dst_path, strerror(errno));
-            return -1;
-        }
-        return 0;
-    }
-    if (!S_ISREG(st.st_mode)) return 0;
-
-    if (copy_file(src_path, dst_path, st.st_mode & 0777) != 0) return -1;
-    chmod(dst_path, st.st_mode & 0777);
-    return 0;
-}
-
-// Normalize "/private/var/..." to "/var/..." (iOS symlinks /var to /private/var).
-static const char *strip_private(const char *p) {
-    if (strncmp(p, "/private/", 9) == 0) return p + 8;
-    return p;
-}
-
-// Planned dump target discovered via first scan.
-typedef struct {
-    mach_vm_address_t image_base;
-    encinfo_t info;
-    char rel[4096];
-} target_t;
-
-// Enumerate every image loaded in the target task; for each image whose path
-// is inside the bundle AND has a non-zero cryptid, dump via mach_vm_read into
-// the corresponding file under app_dst. Returns count of dumped images.
-//
-// Two passes when emitting events, so the Go side can show a real progress
-// bar: first scan collects targets + emits `event=plan total=N`, then each
-// dump emits `event=image idx=i/N`.
-static int dump_encrypted_loaded_images(task_t task, const char *bundle_root,
-                                        const char *app_dst) {
-    struct task_dyld_info dinfo;
-    mach_msg_type_number_t cnt = TASK_DYLD_INFO_COUNT;
-    kern_return_t kr = task_info(task, TASK_DYLD_INFO, (task_info_t)&dinfo, &cnt);
-    if (kr != KERN_SUCCESS) {
-        ERR("task_info(TASK_DYLD_INFO): %d", kr);
-        return 0;
-    }
-    if (dinfo.all_image_info_addr == 0) {
-        ERR("dyld_all_image_infos not yet populated; target didn't get far enough");
-        return 0;
-    }
-
-    struct dyld_all_image_infos aii;
-    mach_vm_size_t n = 0;
-    kr = mach_vm_read_overwrite(task, dinfo.all_image_info_addr, sizeof(aii),
-        (mach_vm_address_t)(uintptr_t)&aii, &n);
-    if (kr != KERN_SUCCESS) {
-        ERR("read dyld_all_image_infos: %d", kr);
-        return 0;
-    }
-
-    uint32_t img_count = aii.infoArrayCount;
-    if (img_count == 0 || img_count > 8192) {
-        ERR("suspicious image count: %u", img_count);
-        return 0;
-    }
-    size_t ia_bytes = (size_t)img_count * sizeof(struct dyld_image_info);
-    struct dyld_image_info *infos = malloc(ia_bytes);
-    kr = mach_vm_read_overwrite(task, (mach_vm_address_t)(uintptr_t)aii.infoArray,
-        ia_bytes, (mach_vm_address_t)(uintptr_t)infos, &n);
-    if (kr != KERN_SUCCESS) {
-        ERR("read infoArray: %d", kr);
-        free(infos);
-        return 0;
-    }
-
-    const char *bundle_n = strip_private(bundle_root);
-    size_t bundle_len = strlen(bundle_n);
-
-    target_t *targets = malloc((size_t)img_count * sizeof(*targets));
-    int n_targets = 0;
-
-    for (uint32_t i = 0; i < img_count; i++) {
-        if (infos[i].imageFilePath == NULL || infos[i].imageLoadAddress == NULL) continue;
-        char path[4096];
-        if (read_cstr_from_task(task,
-                (mach_vm_address_t)(uintptr_t)infos[i].imageFilePath,
-                path, sizeof(path)) != 0) continue;
-        const char *pn = strip_private(path);
-        if (strncmp(pn, bundle_n, bundle_len) != 0) continue;
-
-        const char *rel = pn + bundle_len;
-        while (*rel == '/') rel++;
-
-        mach_vm_address_t image_base = (mach_vm_address_t)(uintptr_t)infos[i].imageLoadAddress;
-        encinfo_t info;
-        if (read_image_encinfo(task, image_base, &info) != 1) continue;
-
-        targets[n_targets].image_base = image_base;
-        targets[n_targets].info = info;
-        snprintf(targets[n_targets].rel, sizeof(targets[n_targets].rel), "%s", rel);
-        n_targets++;
-    }
-    free(infos);
-
-    EVT("event=plan total=%d", n_targets);
-
-    int dumped = 0;
-    for (int i = 0; i < n_targets; i++) {
-        char src[4096], dst[4096];
-        snprintf(src, sizeof(src), "%s/%s", bundle_root, targets[i].rel);
-        snprintf(dst, sizeof(dst), "%s/%s", app_dst, targets[i].rel);
-
-        LOG("[helper] decrypting: %s (load=0x%llx cryptoff=0x%x size=0x%x)\n",
-            targets[i].rel, (unsigned long long)targets[i].image_base,
-            targets[i].info.cryptoff, targets[i].info.cryptsize);
-        EVT("event=image idx=%d total=%d name=\"%s\" size=%u",
-            i + 1, n_targets, targets[i].rel, targets[i].info.cryptsize);
-
-        if (dump_image_region(src, dst, task, targets[i].image_base, &targets[i].info) != 0) {
-            ERR("failed to dump %s", targets[i].rel);
-            EVT("event=image_fail idx=%d name=\"%s\"", i + 1, targets[i].rel);
-            continue;
-        }
-        dumped++;
-    }
-    free(targets);
-    return dumped;
-}
-
-// ----- main-executable identification ---------------------------------
-
-// Derive the main executable file's basename.
-// Strategy: default = bundle directory name minus ".app"/".appex" (matches
-// CFBundleExecutable for the vast majority of apps and extensions). If that
-// file doesn't exist / isn't a Mach-O, fall back to any single Mach-O file
-// directly in the bundle root.
-static int find_main_exec_name(const char *bundle, char *out, size_t out_sz) {
-    const char *bn = strrchr(bundle, '/');
-    bn = bn ? bn + 1 : bundle;
-    char name[4096];
-    snprintf(name, sizeof(name), "%s", bn);
-    size_t nlen = strlen(name);
-    // Try .appex first (6 chars) since it also ends in ".app".
-    if (nlen >= 6 && strcmp(name + nlen - 6, ".appex") == 0) {
-        name[nlen - 6] = 0;
-    } else if (nlen >= 4 && strcmp(name + nlen - 4, ".app") == 0) {
-        name[nlen - 4] = 0;
-    }
-    char candidate[4096];
-    snprintf(candidate, sizeof(candidate), "%s/%s", bundle, name);
-    if (is_macho_file(candidate)) {
-        snprintf(out, out_sz, "%s", name);
-        return 0;
-    }
-    // Fallback: scan bundle root for the first Mach-O file.
+    // Fallback: scan.
     DIR *d = opendir(bundle);
     if (!d) return -1;
-    struct dirent *de;
-    int rc = -1;
-    while ((de = readdir(d)) != NULL) {
-        if (de->d_name[0] == '.') continue;
-        char p[4096];
-        snprintf(p, sizeof(p), "%s/%s", bundle, de->d_name);
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+        char p[4096]; snprintf(p, sizeof(p), "%s/%s", bundle, e->d_name);
         struct stat st;
-        if (lstat(p, &st) < 0 || !S_ISREG(st.st_mode)) continue;
-        if (is_macho_file(p)) {
-            snprintf(out, out_sz, "%s", de->d_name);
-            rc = 0;
-            break;
+        if (lstat(p, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        if (is_macho(p)) {
+            strncpy(out, e->d_name, cap - 1); out[cap - 1] = '\0';
+            closedir(d);
+            return 0;
         }
     }
     closedir(d);
-    return rc;
+    return -1;
 }
 
-// ----- zip helper ------------------------------------------------------
-
-static int zip_payload(const char *staging_dir, const char *out_path) {
-    char abs_out[4096];
-    if (out_path[0] == '/') {
-        snprintf(abs_out, sizeof(abs_out), "%s", out_path);
-    } else {
-        char cwd[4096];
-        if (!getcwd(cwd, sizeof(cwd))) { ERR("getcwd: %s", strerror(errno)); return -1; }
-        snprintf(abs_out, sizeof(abs_out), "%s/%s", cwd, out_path);
-    }
-    pid_t pid = fork();
-    if (pid < 0) { ERR("fork: %s", strerror(errno)); return -1; }
-    if (pid == 0) {
-        if (chdir(staging_dir) != 0) {
-            fprintf(stderr, "[helper] chdir %s: %s\n", staging_dir, strerror(errno));
-            _exit(127);
-        }
-        execl("/usr/bin/zip", "zip", "-rqyX", abs_out, "Payload", (char *)NULL);
-        execl("/usr/local/bin/zip", "zip", "-rqyX", abs_out, "Payload", (char *)NULL);
-        execlp("zip", "zip", "-rqyX", abs_out, "Payload", (char *)NULL);
-        fprintf(stderr, "[helper] exec zip: %s\n", strerror(errno));
-        _exit(127);
-    }
-    int status;
-    if (waitpid(pid, &status, 0) < 0) { ERR("waitpid: %s", strerror(errno)); return -1; }
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        ERR("zip exit %d", WEXITSTATUS(status));
-        return -1;
-    }
-    return 0;
-}
-
-static int rm_rf(const char *path) {
-    struct stat st;
-    if (lstat(path, &st) < 0) return errno == ENOENT ? 0 : -1;
-    if (S_ISDIR(st.st_mode)) {
-        DIR *d = opendir(path);
-        if (!d) return -1;
-        struct dirent *de;
-        while ((de = readdir(d)) != NULL) {
-            if (de->d_name[0] == '.' && (de->d_name[1] == 0 ||
-                (de->d_name[1] == '.' && de->d_name[2] == 0))) continue;
-            char child[4096];
-            snprintf(child, sizeof(child), "%s/%s", path, de->d_name);
-            rm_rf(child);
-        }
-        closedir(d);
-        return rmdir(path);
-    }
-    return unlink(path);
-}
-
-// ----- per-bundle decrypt pass -----------------------------------------
-
-// decrypt_bundle runs the full spawn / dump-main / let-dyld-map / dump-frameworks
-// pipeline for one bundle (the main .app or a PlugIns/*.appex). Returns 0 on
-// success or -1 on a fatal failure that should abort the whole run.
-//
-// bundle_src: absolute source bundle path on the installed device (where the
-//             still-encrypted Mach-Os live - kernel will decrypt them lazily
-//             when we mach_vm_read from the spawned task's map).
-// bundle_dst: absolute destination bundle path inside the staging Payload/
-//             tree (where we write the plaintext copies).
-static int decrypt_bundle(const char *bundle_src, const char *bundle_dst) {
-    char main_exec_name[512];
-    if (find_main_exec_name(bundle_src, main_exec_name, sizeof(main_exec_name)) != 0) {
-        ERR("could not identify main executable in %s", bundle_src);
-        return -1;
-    }
-    LOG("[helper] bundle %s → main=%s\n", bundle_src, main_exec_name);
-    EVT("event=bundle name=\"%s\" main=\"%s\"", bundle_src, main_exec_name);
-
-    char exec_path[4096];
-    snprintf(exec_path, sizeof(exec_path), "%s/%s", bundle_src, main_exec_name);
-
-    pid_t target_pid = 0;
-    task_t target_task = MACH_PORT_NULL;
-    if (spawn_suspended(exec_path, &target_pid, &target_task) != 0) {
-        EVT("event=spawn_failed name=\"%s\"", bundle_src);
-        // Non-fatal: the outer run continues with whatever else it can handle.
+// Decrypt one bundle (main .app, .appex, or any .framework with executable).
+// bundle_src: original bundle on disk
+// bundle_dst: where to write decrypted copy (should already contain a copy
+//             of the bundle tree so we only overwrite the Mach-Os)
+// bundle_id:  optional; when non-empty, SBS is used as the launch method
+//             (only works for main apps registered with LaunchServices)
+static int decrypt_bundle(const char *bundle_src, const char *bundle_dst,
+                          const char *bundle_id) {
+    char main_name[512];
+    if (find_main_name(bundle_src, main_name, sizeof(main_name)) != 0) {
+        LOG("[helper] no main exec in %s, skipping\n", bundle_src);
+        EVT("event=bundle phase=skipped src=\"%s\" reason=\"no_main_exec\"", bundle_src);
         return 0;
     }
-    LOG("[helper] spawned %d for %s\n", target_pid, bundle_src);
-    EVT("event=target_ready pid=%d", target_pid);
+    char main_src[4096], main_dst[4096];
+    snprintf(main_src, sizeof(main_src), "%s/%s", bundle_src, main_name);
+    snprintf(main_dst, sizeof(main_dst), "%s/%s", bundle_dst, main_name);
+    trust_walk(bundle_src);
 
-    // 1) Dump main exec via VM region scan (works before dyld has run).
-    encinfo_t main_info;
-    int er = parse_macho_file(exec_path, &main_info);
+    pid_t pid = 0;
+    task_t task = MACH_PORT_NULL;
+    int via_ptrace = 0;
+    if (spawn_suspended(bundle_id, main_src, &pid, &task, &via_ptrace) != 0) {
+        ERR("spawn failed for %s", bundle_src);
+        EVT("event=spawn_failed src=\"%s\"", bundle_src);
+        return 0; // non-fatal; continue with rest of the IPA
+    }
+
+    // 1) Dump the main exec by reading cryptoff pages out of the VM image.
+    //    Works even before dyld starts binding; FairPlay decrypts on page
+    //    fault during mach_vm_read_overwrite.
+    encinfo_t info;
+    int er = parse_macho(main_src, &info);
     if (er == 1) {
-        mach_vm_address_t main_base = 0;
-        if (find_main_exec_base(target_task, &main_base) == 0) {
-            char main_dst[4096];
-            snprintf(main_dst, sizeof(main_dst), "%s/%s", bundle_dst, main_exec_name);
-            LOG("[helper] decrypting main: %s (load=0x%llx)\n", main_exec_name,
-                (unsigned long long)main_base);
-            EVT("event=main name=\"%s\" size=%u", main_exec_name, main_info.cryptsize);
-            if (dump_image_region(exec_path, main_dst, target_task, main_base, &main_info) == 0) {
-                EVT("event=main_done name=\"%s\"", main_exec_name);
+        mach_vm_address_t base = 0;
+        if (find_main_base(task, &base) == 0) {
+            LOG("[helper] dumping main %s (load=0x%llx, cryptsize=0x%x)\n",
+                main_name, (unsigned long long)base, info.cryptsize);
+            EVT("event=image phase=start name=\"%s\" kind=main", main_name);
+            if (dump_image(main_src, main_dst, task, base, &info) == 0) {
+                EVT("event=image phase=done name=\"%s\" kind=main size=%u",
+                    main_name, info.cryptsize);
             } else {
-                ERR("main exec dump failed for %s", bundle_src);
+                EVT("event=image phase=failed name=\"%s\" kind=main", main_name);
             }
         } else {
             ERR("could not locate MH_EXECUTE base in %s", bundle_src);
         }
     }
 
-    // 2) Set exception port so we can catch dyld's crash on cross-OS bundles,
-    //    then resume briefly to let dyld map frameworks.
-    mach_port_t exc_port = MACH_PORT_NULL;
-    kern_return_t kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &exc_port);
-    if (kr == KERN_SUCCESS) {
-        kr = mach_port_insert_right(mach_task_self(), exc_port, exc_port, MACH_MSG_TYPE_MAKE_SEND);
-    }
-    if (kr == KERN_SUCCESS) {
-        kr = task_set_exception_ports(target_task,
-            EXC_MASK_CRASH | EXC_MASK_BAD_ACCESS |
-            EXC_MASK_BAD_INSTRUCTION | EXC_MASK_SOFTWARE |
-            EXC_MASK_ARITHMETIC | EXC_MASK_BREAKPOINT,
-            exc_port, EXCEPTION_DEFAULT, ARM_THREAD_STATE64);
-    }
-    if (kr != KERN_SUCCESS) {
-        ERR("exception port setup failed for %s: %d", bundle_src, kr);
-    }
+    // 2) Resume dyld so it maps Frameworks/* into the target's address
+    //    space; FairPlay page-faults decrypt them on first access. We set a
+    //    Mach exception port so the inevitable dyld bind-fail (on cross-OS
+    //    missing-symbol abort) pauses the task before the process dies.
+    mach_port_t exc = via_ptrace ? MACH_PORT_NULL : make_exception_port(task);
+    LOG("[helper] resuming %s (via_ptrace=%d)\n", bundle_src, via_ptrace);
+    EVT("event=dyld phase=resuming src=\"%s\" via_ptrace=%d", bundle_src, via_ptrace);
+    run_and_suspend(task, pid, via_ptrace, exc, 2000);
 
-    LOG("[helper] resuming %s to load frameworks (exception-port watch)…\n", bundle_src);
-    EVT("event=dyld state=resuming");
-    kr = task_resume(target_task);
-    if (kr == KERN_SUCCESS && exc_port != MACH_PORT_NULL) {
-        struct {
-            mach_msg_header_t head;
-            char body[2048];
-        } exc_msg;
-        memset(&exc_msg, 0, sizeof(exc_msg));
-        mach_msg_return_t mr = mach_msg(&exc_msg.head,
-            MACH_RCV_MSG | MACH_RCV_TIMEOUT,
-            0, sizeof(exc_msg), exc_port,
-            2000 /* ms */, MACH_PORT_NULL);
-        if (mr == MACH_RCV_TIMED_OUT) {
-            LOG("[helper] %s: no crash within 2s; suspending normally\n", bundle_src);
-            EVT("event=dyld state=finished");
-        } else if (mr == MACH_MSG_SUCCESS) {
-            LOG("[helper] %s: caught Mach exception (dyld bind-fail); task paused\n", bundle_src);
-            EVT("event=dyld state=crashed");
-        } else {
-            ERR("%s: mach_msg wait: 0x%x", bundle_src, mr);
-            EVT("event=dyld state=err code=0x%x", mr);
+    // 3) Enumerate images loaded in the (now suspended or dead) target task
+    //    and dump every encrypted one whose path is inside this bundle.
+    uint32_t img_count = 0;
+    char *paths = NULL;
+    struct dyld_image_info *imgs = list_images(task, &img_count, &paths);
+    int extra = 0;
+    // dyld image paths come back with a /private prefix that bundle_src
+    // doesn't have. Match by suffix stripping either prefix.
+    const char *bs = bundle_src;
+    size_t bs_len = strlen(bs);
+    const char *bs_alt = NULL;
+    size_t bs_alt_len = 0;
+    if (strncmp(bs, "/var/", 5) == 0) {
+        bs_alt = bs; // no-op, but keep form for symmetry
+    }
+    // We'll check both "/bundle_src..." and "/private/bundle_src..." forms.
+    char bs_pri[4096];
+    snprintf(bs_pri, sizeof(bs_pri), "/private%s", bs);
+    bs_alt = bs_pri;
+    bs_alt_len = strlen(bs_pri);
+
+    for (uint32_t i = 0; i < img_count && imgs; i++) {
+        const char *ip = imgs[i].imageFilePath;
+        if (!ip) continue;
+        const char *rel = NULL;
+        if (strncmp(ip, bs, bs_len) == 0) rel = ip + bs_len;
+        else if (strncmp(ip, bs_alt, bs_alt_len) == 0) rel = ip + bs_alt_len;
+        if (!rel) continue;
+        while (*rel == '/') rel++;
+        if (!*rel) continue; // this is the main exec, already handled
+        if (strcmp(rel, main_name) == 0) continue; // main exec at <bundle>/<name>, already handled
+
+        char rel_src[4096], rel_dst[4096];
+        snprintf(rel_src, sizeof(rel_src), "%s/%s", bundle_src, rel);
+        snprintf(rel_dst, sizeof(rel_dst), "%s/%s", bundle_dst, rel);
+        encinfo_t ri;
+        if (parse_macho(rel_src, &ri) != 1) continue;
+        // Sanity-read header at load_addr to confirm the framework is really
+        // mapped there. mach_vm_read of an unmapped region silently returns
+        // zero-filled data which would produce a cryptid=0 IPA with broken
+        // pages.
+        mach_vm_address_t base = (mach_vm_address_t)(uintptr_t)imgs[i].imageLoadAddress;
+        struct mach_header_64 mhchk;
+        mach_vm_size_t got = 0;
+        if (mach_vm_read_overwrite(task, base, sizeof(mhchk),
+                (mach_vm_address_t)(uintptr_t)&mhchk, &got) != KERN_SUCCESS ||
+            got != sizeof(mhchk) ||
+            (mhchk.magic != MH_MAGIC_64 && mhchk.magic != MH_MAGIC)) {
+            LOG("[helper] skip %s: header at 0x%llx not mapped (magic=0x%x)\n",
+                rel, (unsigned long long)base, mhchk.magic);
+            continue;
         }
-        task_suspend(target_task);
-    } else if (kr == KERN_SUCCESS) {
-        usleep(400000);
-        task_suspend(target_task);
+        LOG("[helper] dumping %s (load=0x%llx, cryptsize=0x%x)\n", rel,
+            (unsigned long long)base, ri.cryptsize);
+        EVT("event=image phase=start name=\"%s\" kind=framework", rel);
+        if (dump_image(rel_src, rel_dst, task, base, &ri) == 0) {
+            extra++;
+            EVT("event=image phase=done name=\"%s\" kind=framework size=%u",
+                rel, ri.cryptsize);
+        } else {
+            EVT("event=image phase=failed name=\"%s\" kind=framework", rel);
+        }
     }
+    free(paths); free(imgs);
+    LOG("[helper] %s: dumped %d framework(s)\n", bundle_src, extra);
+    EVT("event=bundle phase=done src=\"%s\" extras=%d", bundle_src, extra);
 
-    // 3) Enumerate loaded images and dump every encrypted one whose path is
-    //    inside this bundle (so main-app frameworks don't get re-dumped when
-    //    we iterate appex plugins, since the filter restricts to bundle_src).
-    if (task_alive(target_task)) {
-        int n = dump_encrypted_loaded_images(target_task, bundle_src, bundle_dst);
-        LOG("[helper] %s: dumped %d additional encrypted image(s)\n", bundle_src, n);
+    if (exc != MACH_PORT_NULL) {
+        mach_port_mod_refs(mach_task_self(), exc, MACH_PORT_RIGHT_RECEIVE, -1);
     }
-
-    task_terminate(target_task);
-    kill(target_pid, SIGKILL);
-    if (exc_port != MACH_PORT_NULL) {
-        mach_port_mod_refs(mach_task_self(), exc_port, MACH_PORT_RIGHT_RECEIVE, -1);
-    }
-    int status;
-    waitpid(target_pid, &status, WNOHANG);
+    task_terminate(task);
+    kill(pid, SIGKILL);
+    int st;
+    waitpid(pid, &st, WNOHANG);
     return 0;
 }
 
-// ----- main ------------------------------------------------------------
+// Walk PlugIns/ and Extensions/ at the top of main_app and decrypt each appex.
+static void decrypt_appexes(const char *bundle_src, const char *bundle_dst) {
+    const char *subdirs[] = { "PlugIns", "Extensions", NULL };
+    for (int si = 0; subdirs[si]; si++) {
+        char dir_src[4096], dir_dst[4096];
+        snprintf(dir_src, sizeof(dir_src), "%s/%s", bundle_src, subdirs[si]);
+        snprintf(dir_dst, sizeof(dir_dst), "%s/%s", bundle_dst, subdirs[si]);
+        DIR *d = opendir(dir_src);
+        if (!d) continue;
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+            const char *dot = strrchr(e->d_name, '.');
+            if (!dot || strcmp(dot, ".appex") != 0) continue;
+            char s[4096], t[4096];
+            snprintf(s, sizeof(s), "%s/%s", dir_src, e->d_name);
+            snprintf(t, sizeof(t), "%s/%s", dir_dst, e->d_name);
+            LOG("[helper] decrypting appex %s/%s\n", subdirs[si], e->d_name);
+            decrypt_bundle(s, t, NULL); // appexes don't launch via SBS
+        }
+        closedir(d);
+    }
+}
+
+// ----- zip via /var/jb/usr/bin/zip ------------------------------------
+
+static int run_zip(const char *staging, const char *ipa_path) {
+    // posix_spawn_file_actions_addchdir_np is iOS-unavailable, so chdir
+    // in the parent. This is the last step of the helper so the pwd change
+    // doesn't matter afterwards.
+    char cwd_save[4096];
+    if (!getcwd(cwd_save, sizeof(cwd_save))) cwd_save[0] = '\0';
+    if (chdir(staging) != 0) { ERR("chdir %s: %s", staging, strerror(errno)); return -1; }
+
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_addopen(&fa, 1, "/dev/null", O_WRONLY, 0);
+    posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
+    char *argv[] = { "zip", "-qr", (char *)ipa_path, "Payload", NULL };
+    pid_t pid = 0;
+    const char *zip_paths[] = { "/var/jb/usr/bin/zip", "/usr/bin/zip", NULL };
+    int rc = -1;
+    for (int i = 0; zip_paths[i]; i++) {
+        if (access(zip_paths[i], X_OK) != 0) continue;
+        rc = posix_spawn(&pid, zip_paths[i], &fa, NULL, argv, environ);
+        if (rc == 0) break;
+    }
+    posix_spawn_file_actions_destroy(&fa);
+    if (cwd_save[0]) chdir(cwd_save);
+    if (rc != 0 || pid == 0) { ERR("zip not available"); return -1; }
+    int st;
+    waitpid(pid, &st, 0);
+    return (WIFEXITED(st) && WEXITSTATUS(st) == 0) ? 0 : -1;
+}
+
+// ----- main -----------------------------------------------------------
 
 int main(int argc, char **argv) {
-    if (argc >= 2 && strcmp(argv[1], "find") == 0) {
-        if (argc != 3) {
-            fprintf(stderr, "usage: %s find <app-dir-name>\n", argv[0]);
-            return 2;
-        }
-        return find_app_dir(argv[2]);
+    // Allow -v at any position before the positional args.
+    int pi = 1;
+    while (pi < argc && argv[pi][0] == '-') {
+        if (strcmp(argv[pi], "-v") == 0) { g_verbose = 1; pi++; continue; }
+        break;
     }
-    if (argc >= 2 && strcmp(argv[1], "sha256") == 0) {
-        if (argc != 3) {
-            fprintf(stderr, "usage: %s sha256 <path>\n", argv[0]);
-            return 2;
-        }
-        return sha256_file(argv[2]);
-    }
-
-    // Flags: -v (human verbose) and -e (machine @evt events) are independent.
-    while (argc > 1 && argv[1][0] == '-' && argv[1][1] != 0) {
-        if (strcmp(argv[1], "-v") == 0) verbose = 1;
-        else if (strcmp(argv[1], "-e") == 0) events = 1;
-        else if (strcmp(argv[1], "-ve") == 0 || strcmp(argv[1], "-ev") == 0) { verbose = 1; events = 1; }
-        else break;
-        argv++; argc--;
-    }
-    if (argc != 3) {
-        fprintf(stderr, "usage: %s [-v] [-e] <bundle-path> <out-ipa>\n       %s find <app-dir-name>\n",
-                argv[0], argv[0]);
+    if (argc - pi != 3) {
+        fprintf(stderr,
+            "usage: %s [-v] <bundle-id> <bundle-src> <out-ipa>\n"
+            "  bundle-id  CFBundleIdentifier (for SBS), or \"\" to skip main app\n"
+            "  bundle-src absolute path to the installed .app on disk\n"
+            "  out-ipa    where to write the decrypted IPA\n",
+            argv[0]);
         return 2;
     }
-    const char *bundle = argv[1];
-    const char *out_ipa = argv[2];
+    const char *bundle_id = argv[pi + 0];
+    const char *bundle_src = argv[pi + 1];
+    const char *out_ipa = argv[pi + 2];
 
-    struct stat bst;
-    if (stat(bundle, &bst) < 0 || !S_ISDIR(bst.st_mode)) {
-        ERR("bundle path is not a directory: %s", bundle);
-        return 1;
-    }
+    // Resolve the bundle's basename for the staging Payload/ layout.
+    char src_copy[4096];
+    snprintf(src_copy, sizeof(src_copy), "%s", bundle_src);
+    char *app_name = strrchr(src_copy, '/');
+    app_name = app_name ? app_name + 1 : src_copy;
+    if (!*app_name || strchr(app_name, '/') != NULL) { ERR("bad bundle path"); return 1; }
 
-    // Identify the main executable relative to the bundle.
-    char main_exec_name[512];
-    if (find_main_exec_name(bundle, main_exec_name, sizeof(main_exec_name)) != 0) {
-        ERR("could not identify main executable in %s", bundle);
-        return 1;
-    }
-    LOG("[helper] main executable: %s\n", main_exec_name);
-    EVT("event=start bundle=\"%s\" main=\"%s\"", bundle, main_exec_name);
-
-    // Build staging dir and copy every file from the bundle verbatim.
-    // Encrypted Mach-Os get overwritten below with plaintext.
+    // Staging tree: /tmp/ipadecrypt-<pid>/Payload/<app>.app
     char staging[4096];
-    snprintf(staging, sizeof(staging), "/tmp/ipadecrypt-helper-%d", getpid());
-    if (mkdir(staging, 0755) != 0 && errno != EEXIST) {
-        ERR("mkdir %s: %s", staging, strerror(errno));
-        return 1;
-    }
-    char payload_dir[4096];
-    snprintf(payload_dir, sizeof(payload_dir), "%s/Payload", staging);
-    mkdir(payload_dir, 0755);
-    char bundle_copy[4096]; snprintf(bundle_copy, sizeof(bundle_copy), "%s", bundle);
-    const char *app_name = basename(bundle_copy);
-    char app_dst[4096];
-    snprintf(app_dst, sizeof(app_dst), "%s/%s", payload_dir, app_name);
-    mkdir(app_dst, 0755);
+    snprintf(staging, sizeof(staging), "/tmp/ipadecrypt-%d", getpid());
+    mkdirs(staging);
+    char payload[4096];
+    snprintf(payload, sizeof(payload), "%s/Payload", staging);
+    mkdir(payload, 0755);
+    char bundle_dst[4096];
+    snprintf(bundle_dst, sizeof(bundle_dst), "%s/%s", payload, app_name);
 
-    LOG("[helper] copying bundle → %s\n", app_dst);
-    if (copy_tree(bundle, app_dst, "") != 0) {
+    LOG("[helper] staging %s → %s\n", bundle_src, bundle_dst);
+    if (copy_tree(bundle_src, bundle_dst) != 0) {
+        ERR("copy_tree failed");
         rm_rf(staging);
         return 1;
     }
 
-    // Decrypt the main .app (main exec + its dyld-loaded frameworks).
-    if (decrypt_bundle(bundle, app_dst) < 0) {
-        rm_rf(staging);
-        return 1;
+    if (bundle_id && bundle_id[0]) {
+        decrypt_bundle(bundle_src, bundle_dst, bundle_id);
     }
-
-    // Iterate PlugIns/*.appex and Extensions/*.appex and decrypt each one.
-    // Each .appex is a self-contained bundle with its own main exec + optional
-    // Frameworks/; it wouldn't be reached by dyld while the main app is merely
-    // spawned suspended, so we need its own spawn-and-dump pass.
-    //
-    // PlugIns/ is the classic NSExtension location; Extensions/ is used by
-    // iOS 18+ ExtensionKit (e.g. YouTube's AppMigrationExtension). Both must
-    // be scanned - skipping one leaves encrypted binaries in the output IPA.
-    //
-    // Note we only look at the main app's PlugIns/ and Extensions/, not any
-    // nested appex inside Watch/ - those are watchOS binaries, can't execute
-    // on iPhone.
-    static const char *appex_subdirs[] = { "PlugIns", "Extensions" };
-    for (size_t i = 0; i < sizeof(appex_subdirs) / sizeof(appex_subdirs[0]); i++) {
-        const char *sub = appex_subdirs[i];
-        char plugins_src[4096];
-        snprintf(plugins_src, sizeof(plugins_src), "%s/%s", bundle, sub);
-        DIR *pd = opendir(plugins_src);
-        if (!pd) continue;
-        struct dirent *pde;
-        while ((pde = readdir(pd)) != NULL) {
-            size_t nl = strlen(pde->d_name);
-            if (nl < 6 || strcmp(pde->d_name + nl - 6, ".appex") != 0) continue;
-            char appex_src[4096], appex_dst[4096];
-            snprintf(appex_src, sizeof(appex_src), "%s/%s", plugins_src, pde->d_name);
-            snprintf(appex_dst, sizeof(appex_dst), "%s/%s/%s", app_dst, sub, pde->d_name);
-            LOG("[helper] decrypting plugin %s/%s\n", sub, pde->d_name);
-            EVT("event=plugin_start name=\"%s\"", pde->d_name);
-            (void)decrypt_bundle(appex_src, appex_dst);
-        }
-        closedir(pd);
-    }
+    decrypt_appexes(bundle_src, bundle_dst);
 
     LOG("[helper] zipping → %s\n", out_ipa);
-    EVT("event=zip");
-    if (zip_payload(staging, out_ipa) != 0) {
+    EVT("event=pack phase=start ipa=\"%s\"", out_ipa);
+    unlink(out_ipa);
+    if (run_zip(staging, out_ipa) != 0) {
+        ERR("zip failed");
+        EVT("event=pack phase=failed ipa=\"%s\"", out_ipa);
         rm_rf(staging);
-        EVT("event=fail stage=zip");
         return 1;
     }
+    EVT("event=pack phase=done ipa=\"%s\"", out_ipa);
     rm_rf(staging);
-    EVT("event=done");
+    EVT("event=done ipa=\"%s\"", out_ipa);
     return 0;
 }

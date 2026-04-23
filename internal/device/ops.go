@@ -10,11 +10,12 @@ import (
 	"io"
 	"path"
 	"strings"
+	"time"
 
 	"howett.net/plist"
 )
 
-//go:embed helper.arm64
+//go:embed ipadecrypt-helper-arm64
 var helperArm64 []byte
 
 type ProbeResult struct {
@@ -122,22 +123,32 @@ func (c *Client) LocateAppSync() (string, error) {
 }
 
 func (c *Client) Install(appinstPath, ipaRemote string) error {
-	out, errOut, code, err := c.RunSudo(fmt.Sprintf("%s %q", appinstPath, ipaRemote))
-	if err != nil {
-		return fmt.Errorf("appinst: %w", err)
+	// appinst is occasionally flaky on Dopamine: installd or LaunchServices
+	// returns a transient error (often exit 6) that disappears on a second
+	// attempt a moment later. Retry a couple times with a short backoff.
+	var lastOut, lastErr string
+	var lastCode int
+	for attempt := range 3 {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * time.Second)
+		}
+		out, errOut, code, err := c.RunSudo(fmt.Sprintf("%s %q", appinstPath, ipaRemote))
+		if err != nil {
+			return fmt.Errorf("appinst: %w", err)
+		}
+		if code == 0 {
+			return nil
+		}
+		lastOut, lastErr, lastCode = out, errOut, code
 	}
 
-	if code != 0 {
-		return fmt.Errorf("appinst exit %d:\nstdout: %s\nstderr: %s", code, out, errOut)
-	}
-
-	return nil
+	return fmt.Errorf("appinst exit %d:\nstdout: %s\nstderr: %s", lastCode, lastOut, lastErr)
 }
 
 func (c *Client) EnsureHelper() (string, error) {
 	sum := sha256.Sum256(helperArm64)
 	remote := path.Join(RemoteRoot, "helpers",
-		fmt.Sprintf("helper-arm64-%s.bin", hex.EncodeToString(sum[:])[:12]))
+		fmt.Sprintf("ipadecrypt-helper-arm64-%s.bin", hex.EncodeToString(sum[:])[:12]))
 
 	if c.Exists(remote) {
 		return remote, nil
@@ -150,21 +161,33 @@ func (c *Client) EnsureHelper() (string, error) {
 	return remote, nil
 }
 
-// HashFile runs `<helperPath> sha256 <path>` under sudo (installed bundles
-// under /var/containers are readable only by root + _installd). Returns the
-// lowercase-hex digest or an error.
-func (c *Client) HashFile(helperPath, path string) (string, error) {
-	cmd := fmt.Sprintf("%s sha256 %q", helperPath, path)
-
+// HashFile computes the sha256 of a path on-device. Installed bundles under
+// /var/containers are readable only by root + _installd, hence sudo. Relies
+// on a `shasum` binary being on PATH (procursus/dopamine/palera1n all ship
+// it at /var/jb/usr/bin/shasum).
+func (c *Client) HashFile(_unused, target string) (string, error) {
+	// procursus (Dopamine + palera1n) ships sha256sum (from coreutils) and
+	// shasum (perl). Try both. Output is `<hex>  <path>`; cut first field.
+	cmd := fmt.Sprintf(
+		"sh -c '"+
+			"for p in sha256sum /var/jb/usr/bin/sha256sum /usr/bin/sha256sum "+
+			"shasum /var/jb/usr/bin/shasum /usr/bin/shasum; do "+
+			"  if command -v \"$p\" >/dev/null 2>&1; then "+
+			"    case \"$p\" in "+
+			"      *shasum) \"$p\" -a 256 %[1]q | cut -d\" \" -f1; exit 0;; "+
+			"      *) \"$p\" %[1]q | cut -d\" \" -f1; exit 0;; "+
+			"    esac; "+
+			"  fi; "+
+			"done; exit 127"+
+			"'",
+		target)
 	out, errOut, code, err := c.RunSudo(cmd)
 	if err != nil {
-		return "", fmt.Errorf("helper sha256: %w", err)
+		return "", fmt.Errorf("shasum: %w", err)
 	}
-
 	if code != 0 {
-		return "", fmt.Errorf("helper sha256 exit %d: %s", code, strings.TrimSpace(errOut))
+		return "", fmt.Errorf("shasum exit %d: %s", code, strings.TrimSpace(errOut))
 	}
-
 	return strings.TrimSpace(out), nil
 }
 
@@ -210,51 +233,54 @@ func (c *Client) InstalledVersion(bundlePath string) (string, error) {
 	return "", errors.New("installed version not found")
 }
 
-func (c *Client) FindInstalled(helperPath, appDirName string) (string, error) {
-	cmd := fmt.Sprintf("%s find %q", helperPath, appDirName)
+// FindInstalled locates an installed app bundle directory by its .app name.
+// Installed apps live under /var/containers/Bundle/Application/<uuid>/X.app
+// on rootful and rootless setups alike. Requires sudo because /var/containers
+// is readable only by _installd + root.
+func (c *Client) FindInstalled(_unused, appDirName string) (string, error) {
+	cmd := fmt.Sprintf(
+		"ls -d /var/containers/Bundle/Application/*/%q 2>/dev/null | head -1",
+		appDirName)
 	out, errOut, code, err := c.RunSudo(cmd)
 	if err != nil {
 		return "", err
 	}
-
-	switch code {
-	case 0:
-		return strings.TrimSpace(out), nil
-	case 1:
-		if strings.Contains(errOut, "[helper] find: scanned") {
-			return "", nil
-		}
-
-		if s := strings.TrimSpace(errOut); s != "" {
-			return "", fmt.Errorf("helper find: %s", s)
-		}
-
-		return "", errors.New("helper find produced no output (sudo/codesign/exec issue?)")
-	default:
-		return "", fmt.Errorf("helper find exit %d: stdout=%q stderr=%q", code, out, errOut)
+	if code != 0 && code != 1 {
+		return "", fmt.Errorf("find installed exit %d: stderr=%q", code, errOut)
 	}
+	return strings.TrimSpace(out), nil
 }
 
+// VerifyHelper is a best-effort sanity: invoke the helper with no args; it
+// should exit 2 with a usage string we can recognize. Catches common issues
+// (binary not executable, sudo denied, missing codesign).
 func (c *Client) VerifyHelper(helperPath string) error {
-	path, err := c.FindInstalled(helperPath, "__ipadecrypt_probe_nope__.app")
+	cmd := fmt.Sprintf("%s 2>&1 | head -1", helperPath)
+	out, _, _, err := c.RunSudo(cmd)
 	if err != nil {
-		return err
+		return fmt.Errorf("verify helper: %w", err)
 	}
-
-	if path != "" {
-		return fmt.Errorf("unexpected match for probe bundle: %s", path)
+	if !strings.Contains(out, "usage:") {
+		return fmt.Errorf("helper didn't respond with usage (got %q)", strings.TrimSpace(out))
 	}
-
 	return nil
 }
 
 type EventHandler func(Event)
 
-func (c *Client) RunHelper(helperPath, bundlePath, outIPA string, onEvent EventHandler, humanFallback io.Writer) (string, string, int, error) {
-	cmd := fmt.Sprintf("%s -e %q %q", helperPath, bundlePath, outIPA)
+// RunHelper spawns the on-device helper for a bundle. bundleID goes to the
+// SpringBoard SBS SPI (only accepted for the main app; empty string skips
+// the main-app pass and just decrypts PlugIns/*.appex + Extensions/*.appex).
+func (c *Client) RunHelper(helperPath, bundleID, bundlePath, outIPA string, onEvent EventHandler, humanFallback io.Writer) (string, string, int, error) {
+	cmd := fmt.Sprintf("%s -v %q %q %q", helperPath, bundleID, bundlePath, outIPA)
+	// Helper emits structured @evt lines on stdout (parsed by splitter) and
+	// diagnostic LOG/ERR text on stderr. Route accordingly: stdout → splitter,
+	// stderr → humanFallback if caller wants live passthrough. Both streams
+	// are also accumulated by RunSudoStream into the returned strings so the
+	// caller can surface context on failure.
 	splitter := newEventSplitter(onEvent, humanFallback)
 	defer splitter.Close()
-	return c.RunSudoStream(cmd, nil, splitter)
+	return c.RunSudoStream(cmd, splitter, humanFallback)
 }
 
 type eventSplitter struct {

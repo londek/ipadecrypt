@@ -31,8 +31,8 @@ jobs:
       - name: go build
         run: go build -trimpath -ldflags="-s -w" -o ipadecrypt ./cmd/ipadecrypt
 
-  helper:
-    name: helper
+  ipadecrypt-helper:
+    name: verify ipadecrypt-helper drift
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

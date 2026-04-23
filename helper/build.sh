@@ -1,5 +1,6 @@
 #!/bin/sh
-# Build helper.arm64 inside the pinned Docker toolchain to ensure consistent build across platforms.
+# Build ipadecrypt-helper-arm64 inside the pinned Docker toolchain to ensure
+# consistent build across platforms.
 # To build the toolchain locally set IPADECRYPT_TOOLCHAIN_IMAGE=build.
 
 set -e
@@ -31,7 +32,7 @@ fi
 
 mkdir -p helper/dist
 
-echo "==> compiling helper.arm64 in container"
+echo "==> compiling ipadecrypt-helper-arm64 in container"
 docker run --rm \
     --platform linux/amd64 \
     -v "$PWD:/workspace" \
@@ -50,8 +51,8 @@ docker run --rm \
             -Wno-incompatible-sysroot \
             -O2 -fno-stack-protector -Wno-deprecated-declarations \
             -no-canonical-prefixes \
-            -o helper/dist/helper.arm64 helper/helper.c
-        ldid -S"helper/entitlements.plist" helper/dist/helper.arm64
+            -o helper/dist/ipadecrypt-helper-arm64 helper/helper.c
+        ldid -S"helper/entitlements.plist" helper/dist/ipadecrypt-helper-arm64
     '
 
-echo "ok: helper/dist/helper.arm64"
+echo "ok: helper/dist/ipadecrypt-helper-arm64"

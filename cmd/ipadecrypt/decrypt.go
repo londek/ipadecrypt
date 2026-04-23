@@ -37,6 +37,7 @@ type patchResult struct {
 	patchedPath   string
 	changed       bool
 	previousMinOS string
+	watchStripped int
 }
 
 type installPlan struct {
@@ -82,13 +83,10 @@ type helperUpdate struct {
 }
 
 type helperProgress struct {
-	planTotal        atomic.Int64
-	planDone         atomic.Int64
 	dumpedTotal      atomic.Int64
 	dumpedMain       atomic.Int64
 	dumpedFrameworks atomic.Int64
 	dumpedOther      atomic.Int64
-	pluginCount      atomic.Int64
 }
 
 func parseDecryptArg(raw string) (decryptTarget, error) {
@@ -323,6 +321,9 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		}
 	}()
 
+	if patch.watchStripped > 0 {
+		live.Note("removed %d Watch/ entries (pre-install)", patch.watchStripped)
+	}
 	if patch.changed {
 		live.OK("MinimumOSVersion %s → %s", patch.previousMinOS, probe.IOSVersion)
 	} else {
@@ -411,7 +412,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	_, _, code, err := dev.RunHelper(plan.helperPath, install.bundlePath, outRemote, onEvent, nil)
+	_, _, code, err := dev.RunHelper(plan.helperPath, appBundleID, install.bundlePath, outRemote, onEvent, nil)
 	if err != nil {
 		live.Fail("helper run: %v", err)
 		return
@@ -579,7 +580,17 @@ func patchSourceForDevice(encPath, iosVersion string) (patchResult, error) {
 		return patchResult{}, err
 	}
 
-	if !changed {
+	// installd rejects WatchKit 2 bundles whose Watch/*.app/Frameworks layout
+	// isn't compatible with watchOS 3.0+. We can't install or run the Watch
+	// slice anyway on an iPhone, so always strip it from the upload IPA.
+	// watchRemoved, err := pipeline.StripWatch(tmp)
+	// if err != nil {
+	// 	_ = os.Remove(tmp)
+	// 	return patchResult{}, fmt.Errorf("strip watch: %w", err)
+	// }
+
+	watchRemoved := 0
+	if !changed && watchRemoved == 0 {
 		_ = os.Remove(tmp)
 		return patchResult{uploadPath: encPath}, nil
 	}
@@ -587,8 +598,9 @@ func patchSourceForDevice(encPath, iosVersion string) (patchResult, error) {
 	return patchResult{
 		uploadPath:    tmp,
 		patchedPath:   tmp,
-		changed:       true,
+		changed:       changed,
 		previousMinOS: previous,
+		watchStripped: watchRemoved,
 	}, nil
 }
 
@@ -741,89 +753,123 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
+func pluralize(count, noun string) string {
+	if count == "1" {
+		return count + " " + noun
+	}
+	return count + " " + noun + "s"
+}
+
+// prettyImageName renders helper image paths as something readable.
+//   "Sensor-App"                                   -> "Sensor-App"
+//   "Frameworks/Foo.framework/Foo"                 -> "Foo.framework"
+//   "Frameworks/Foo.framework/Versions/A/Foo"      -> "Foo.framework"
+//   "PlugIns/Bar.appex/Bar"                        -> "Bar.appex"
+// Anything else passes through unchanged.
+func prettyImageName(name string) string {
+	if i := strings.Index(name, ".framework/"); i >= 0 {
+		start := strings.LastIndex(name[:i], "/") + 1
+		return name[start:i] + ".framework"
+	}
+	if i := strings.Index(name, ".appex/"); i >= 0 {
+		start := strings.LastIndex(name[:i], "/") + 1
+		return name[start:i] + ".appex"
+	}
+	return name
+}
+
+func parseInt64(s string) int64 {
+	var n int64
+	fmt.Sscanf(s, "%d", &n)
+	return n
+}
+
 func (p *helperProgress) HandleEvent(ev device.Event) helperUpdate {
 	switch ev.Name {
 	case "bundle":
-		return helperUpdate{spin: "analyzing main bundle"}
+		switch ev.Attr("phase") {
+		case "done":
+			extras := ev.Attr("extras")
+			if extras == "0" {
+				return helperUpdate{}
+			}
+			return helperUpdate{note: fmt.Sprintf("bundle done (%s)", pluralize(extras, "framework"))}
+		case "skipped":
+			return helperUpdate{note: fmt.Sprintf("bundle skipped: %s (%s)", filepath.Base(ev.Attr("src")), ev.Attr("reason"))}
+		}
 
-	case "plugin_start":
-		p.pluginCount.Add(1)
-		return helperUpdate{
-			note: fmt.Sprintf("found extension %s", ev.Attr("name")),
-			spin: fmt.Sprintf("decrypting extension %s", ev.Attr("name")),
+	case "spawn_chmod":
+		return helperUpdate{note: fmt.Sprintf("chmod +x %s (was mode %s)", filepath.Base(ev.Attr("path")), ev.Attr("old_mode"))}
+
+	case "spawn_path":
+		if ev.Attr("path") == "ptrace" {
+			return helperUpdate{note: fmt.Sprintf("spawned %s via ptrace fallback", filepath.Base(ev.Attr("exec")))}
+		}
+		return helperUpdate{}
+
+	case "spawn_path_fallback":
+		return helperUpdate{note: fmt.Sprintf("%s failed on %s, falling back", ev.Attr("from"), filepath.Base(ev.Attr("exec")))}
+
+	case "dyld":
+		if ev.Attr("phase") == "resuming" {
+			return helperUpdate{spin: fmt.Sprintf("running %s so dyld binds frameworks", filepath.Base(ev.Attr("src")))}
 		}
 
 	case "spawn_failed":
-		return helperUpdate{note: fmt.Sprintf("could not spawn %s (skipped)", ev.Attr("name"))}
-
-	case "spawn_chmod":
-		return helperUpdate{
-			note: fmt.Sprintf("chmod +x on %s (was mode %s) to unblock spawn",
-				filepath.Base(ev.Attr("path")), ev.Attr("old_mode")),
-		}
-
-	case "main":
-		return helperUpdate{spin: fmt.Sprintf("decrypting main executable: %s", ev.Attr("name"))}
-
-	case "dyld":
-		switch ev.Attr("state") {
-		case "resuming":
-			return helperUpdate{spin: "letting dyld map frameworks"}
-		case "crashed":
-			return helperUpdate{note: "dyld crashed on a missing iOS symbol - frameworks mapped, proceeding"}
-		}
-
-	case "plan":
-		var total int64
-		fmt.Sscanf(ev.Attr("total"), "%d", &total)
-		p.planTotal.Store(total)
-		p.planDone.Store(0)
-
-		if total == 0 {
-			return helperUpdate{spin: "no frameworks to decrypt"}
-		}
-
-		return helperUpdate{
-			progress:     true,
-			progressCur:  0,
-			progressMax:  total,
-			progressText: fmt.Sprintf("decrypting %d framework(s)", total),
-		}
+		return helperUpdate{note: fmt.Sprintf("could not spawn %s (skipped)", filepath.Base(ev.Attr("src")))}
 
 	case "image":
-		cur := p.planDone.Add(1)
-		p.dumpedTotal.Add(1)
-
 		name := ev.Attr("name")
-		switch {
-		case strings.Contains(name, ".framework/"):
-			p.dumpedFrameworks.Add(1)
-		case !strings.Contains(name, "/"):
-			p.dumpedMain.Add(1)
-		default:
-			p.dumpedOther.Add(1)
+		pretty := prettyImageName(name)
+		switch ev.Attr("phase") {
+		case "start":
+			return helperUpdate{spin: fmt.Sprintf("decrypting %s", pretty)}
+		case "done":
+			p.dumpedTotal.Add(1)
+			switch ev.Attr("kind") {
+			case "main":
+				p.dumpedMain.Add(1)
+			case "framework":
+				p.dumpedFrameworks.Add(1)
+			default:
+				p.dumpedOther.Add(1)
+			}
+			size := parseInt64(ev.Attr("size"))
+			return helperUpdate{
+				note: fmt.Sprintf("decrypted %s (%s)", pretty, humanBytes(size)),
+				spin: fmt.Sprintf("decrypted %d image(s)", p.dumpedTotal.Load()),
+			}
+		case "failed":
+			return helperUpdate{note: fmt.Sprintf("failed to decrypt %s", pretty)}
 		}
 
-		display := name
-		if len(display) > 48 {
-			display = "…" + display[len(display)-47:]
+	case "pack":
+		switch ev.Attr("phase") {
+		case "start":
+			return helperUpdate{spin: fmt.Sprintf("packaging IPA → %s", filepath.Base(ev.Attr("ipa")))}
+		case "done":
+			return helperUpdate{note: fmt.Sprintf("packaged → %s", filepath.Base(ev.Attr("ipa")))}
+		case "failed":
+			return helperUpdate{note: fmt.Sprintf("pack failed → %s", filepath.Base(ev.Attr("ipa")))}
 		}
 
-		return helperUpdate{
-			progress:     true,
-			progressCur:  cur,
-			progressMax:  p.planTotal.Load(),
-			progressText: display,
-		}
-
-	case "image_fail":
-		return helperUpdate{note: fmt.Sprintf("failed to dump %s", ev.Attr("name"))}
-
-	case "zip":
-		return helperUpdate{spin: "packaging IPA on device"}
+	case "done":
+		return helperUpdate{}
 	}
 
-	return helperUpdate{}
+	// Unknown event: surface everything we got so nothing is silently dropped.
+	parts := make([]string, 0, len(ev.Attrs)+1)
+	parts = append(parts, "event="+ev.Name)
+
+	for k, v := range ev.Attrs {
+		if k == "event" {
+			continue
+		}
+
+		parts = append(parts, fmt.Sprintf("%s=%q", k, v))
+	}
+
+	return helperUpdate{note: strings.Join(parts, " ")}
 }
 
 func (p *helperProgress) Summary() string {
@@ -831,14 +877,10 @@ func (p *helperProgress) Summary() string {
 	main := p.dumpedMain.Load()
 	frameworks := p.dumpedFrameworks.Load()
 	other := p.dumpedOther.Load()
-	plugins := p.pluginCount.Load()
 
 	summary := fmt.Sprintf("decrypted %d image(s): %d main, %d framework", total, main, frameworks)
 	if other > 0 {
 		summary += fmt.Sprintf(", %d other", other)
-	}
-	if plugins > 0 {
-		summary += fmt.Sprintf(" · %d extension(s)", plugins)
 	}
 
 	return summary
