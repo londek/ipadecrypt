@@ -321,13 +321,14 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		}
 	}()
 
-	if patch.watchStripped > 0 {
-		live.Note("removed %d Watch/ entries (pre-install)", patch.watchStripped)
-	}
 	if patch.changed {
 		live.OK("MinimumOSVersion %s → %s", patch.previousMinOS, probe.IOSVersion)
 	} else {
 		live.OK("no MinimumOSVersion change needed")
+	}
+
+	if patch.watchStripped > 0 {
+		tui.OK("stripped %d Watch/ entries", patch.watchStripped)
 	}
 
 	plan, err := buildInstallPlan(dev, patch.uploadPath)
@@ -454,18 +455,6 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	if !decryptKeepWatch {
-		live.Spin("stripping Watch/")
-		n, err := pipeline.StripWatch(outLocal)
-		if err != nil {
-			live.Fail("strip watch failed")
-			tui.Err("strip watch: %v", err)
-			return
-		}
-		if n > 0 {
-			live.Note("removed %d Watch/ entries", n)
-		}
-	}
 	live.OK("→ %s", outLocal)
 
 	if !decryptNoVerify {
@@ -559,7 +548,7 @@ func fetchRemoteEncryptedSource(cfg *config.Config, paths *config.Paths, as *app
 }
 
 func patchSourceForDevice(encPath, iosVersion string) (patchResult, error) {
-	pattern := strings.TrimSuffix(filepath.Base(encPath), ".ipa") + "-minos-*.ipa"
+	pattern := strings.TrimSuffix(filepath.Base(encPath), ".ipa") + "-patched-*.ipa"
 	f, err := os.CreateTemp("", pattern)
 	if err != nil {
 		return patchResult{}, fmt.Errorf("create temp ipa: %w", err)
@@ -574,23 +563,13 @@ func patchSourceForDevice(encPath, iosVersion string) (patchResult, error) {
 		return patchResult{}, fmt.Errorf("prepare temp ipa: %w", err)
 	}
 
-	changed, previous, err := pipeline.PatchMinOS(encPath, tmp, iosVersion)
+	res, err := pipeline.PatchForInstall(encPath, tmp, iosVersion, decryptKeepWatch)
 	if err != nil {
 		_ = os.Remove(tmp)
 		return patchResult{}, err
 	}
 
-	// installd rejects WatchKit 2 bundles whose Watch/*.app/Frameworks layout
-	// isn't compatible with watchOS 3.0+. We can't install or run the Watch
-	// slice anyway on an iPhone, so always strip it from the upload IPA.
-	// watchRemoved, err := pipeline.StripWatch(tmp)
-	// if err != nil {
-	// 	_ = os.Remove(tmp)
-	// 	return patchResult{}, fmt.Errorf("strip watch: %w", err)
-	// }
-
-	watchRemoved := 0
-	if !changed && watchRemoved == 0 {
+	if !res.MinOSChanged && res.WatchRemoved == 0 {
 		_ = os.Remove(tmp)
 		return patchResult{uploadPath: encPath}, nil
 	}
@@ -598,9 +577,9 @@ func patchSourceForDevice(encPath, iosVersion string) (patchResult, error) {
 	return patchResult{
 		uploadPath:    tmp,
 		patchedPath:   tmp,
-		changed:       changed,
-		previousMinOS: previous,
-		watchStripped: watchRemoved,
+		changed:       res.MinOSChanged,
+		previousMinOS: res.PreviousMinOS,
+		watchStripped: res.WatchRemoved,
 	}, nil
 }
 
@@ -761,10 +740,12 @@ func pluralize(count, noun string) string {
 }
 
 // prettyImageName renders helper image paths as something readable.
-//   "Sensor-App"                                   -> "Sensor-App"
-//   "Frameworks/Foo.framework/Foo"                 -> "Foo.framework"
-//   "Frameworks/Foo.framework/Versions/A/Foo"      -> "Foo.framework"
-//   "PlugIns/Bar.appex/Bar"                        -> "Bar.appex"
+//
+//	"Sensor-App"                                   -> "Sensor-App"
+//	"Frameworks/Foo.framework/Foo"                 -> "Foo.framework"
+//	"Frameworks/Foo.framework/Versions/A/Foo"      -> "Foo.framework"
+//	"PlugIns/Bar.appex/Bar"                        -> "Bar.appex"
+//
 // Anything else passes through unchanged.
 func prettyImageName(name string) string {
 	if i := strings.Index(name, ".framework/"); i >= 0 {

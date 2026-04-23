@@ -15,51 +15,67 @@ import (
 	"howett.net/plist"
 )
 
-func PatchMinOS(src, dst, target string) (bool, string, error) {
+// PatchResult is the outcome of a single pre-install pass over an IPA:
+// a combined MinimumOSVersion rewrite (main app's Info.plist) and Watch/
+// slice strip (installd rejects the WatchKit-2 layout on iPhone-only
+// installs with MIInstallerErrorDomain Code=119).
+type PatchResult struct {
+	MinOSChanged  bool
+	PreviousMinOS string
+	WatchRemoved  int
+}
+
+// PatchForInstall walks src, rewrites the main app's Info.plist
+// MinimumOSVersion if it exceeds target, optionally drops every Watch/
+// entry, and writes the result to dst. Single zip pass. Watch/ is stripped
+// by default because installd rejects WatchKit-2 layouts on iPhone with
+// MIInstallerErrorDomain Code=119; keepWatch bypasses that.
+func PatchForInstall(src, dst, target string, keepWatch bool) (PatchResult, error) {
+	var res PatchResult
+
 	r, err := zip.OpenReader(src)
 	if err != nil {
-		return false, "", fmt.Errorf("open %s: %w", src, err)
+		return res, fmt.Errorf("open %s: %w", src, err)
 	}
 	defer r.Close()
 
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return false, "", fmt.Errorf("mkdir %s: %w", filepath.Dir(dst), err)
+		return res, fmt.Errorf("mkdir %s: %w", filepath.Dir(dst), err)
 	}
 
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
-		return false, "", fmt.Errorf("open dst %s: %w", dst, err)
+		return res, fmt.Errorf("open dst %s: %w", dst, err)
 	}
-
 	defer out.Close()
 
 	w := zip.NewWriter(out)
-
 	defer w.Close()
 
-	patched := false
-	previous := ""
 	for _, f := range r.File {
+		if !keepWatch && isWatchPath(f.Name) {
+			res.WatchRemoved++
+			continue
+		}
+
 		if isMainAppInfoPlist(f.Name) {
 			changed, prev, err := rewriteInfoPlist(f, target, w)
 			if err != nil {
-				return patched, previous, fmt.Errorf("rewrite %s: %w", f.Name, err)
+				return res, fmt.Errorf("rewrite %s: %w", f.Name, err)
 			}
-
 			if changed {
-				patched = true
-				previous = prev
+				res.MinOSChanged = true
+				res.PreviousMinOS = prev
 			}
-
 			continue
 		}
 
 		if err := copyEntry(f, w); err != nil {
-			return patched, previous, fmt.Errorf("copy %s: %w", f.Name, err)
+			return res, fmt.Errorf("copy %s: %w", f.Name, err)
 		}
 	}
 
-	return patched, previous, nil
+	return res, nil
 }
 
 func isMainAppInfoPlist(name string) bool {
@@ -329,10 +345,6 @@ func StripMetadata(ipaPath string) (bool, error) {
 		return strings.EqualFold(filepath.Base(name), "iTunesMetadata.plist")
 	})
 	return n > 0, err
-}
-
-func StripWatch(ipaPath string) (int, error) {
-	return rewriteIPA(ipaPath, isWatchPath)
 }
 
 func isWatchPath(name string) bool {
