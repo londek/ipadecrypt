@@ -263,7 +263,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 			return
 		}
 
-		live.OK("Found %s on AppStore", app.BundleID)
+		live.OK("found %s on App Store", app.BundleID)
 
 		live = tui.NewLive()
 		live.Spin("fetching download metadata")
