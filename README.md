@@ -18,7 +18,7 @@
 
 ## The trick
 
-You don't have to *run* an encrypted iOS app to decrypt it. After `posix_spawn` with `POSIX_SPAWN_START_SUSPENDED`, grab a `task_for_pid` port, and `mach_vm_read` the `__TEXT` segment. The kernel's fault handler runs FairPlay's decrypter on the target's behalf and hands back plaintext. So we kind of simplified the problem of decrypting .ipa to bare minimum. It's my braindead way of calling `mremap_encrypted` without `mremap_encrypted`.
+You don't have to *run* an encrypted iOS app to decrypt it. After `posix_spawn` with `POSIX_SPAWN_START_SUSPENDED` or `SBSLaunchApplicationWithIdentifier` - `mach_vm_read` the `__TEXT` segment to get plaintext. So we kind of simplified the problem of decrypting .ipa to bare minimum. It's my braindead way of calling `mremap_encrypted` without `mremap_encrypted`.
 
 ## Requirements
 
@@ -37,7 +37,7 @@ All installable through Sileo:
 | **appinst** | Installs modified IPAs on the device |
 | **zip** | Packages the decrypted IPA on-device |
 
-> Tested on iOS 16.7.11 / palera1n rootless / iPhone 8 Plus. iOS 14 through 17 on A10–A14 devices are expected to work.
+> Tested on iOS 16.7.11 with palera1n rootless and Dopamine on iPhone 8 Plus. iOS 14 through 17 on A10–A14 devices are expected to work.
 
 ## Install
 

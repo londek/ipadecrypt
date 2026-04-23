@@ -118,21 +118,21 @@ jobs:
           IPADECRYPT_TOOLCHAIN_IMAGE: ${{ steps.meta.outputs.image }}
         run: ./helper/build.sh
 
-      - name: upload fresh helper.arm64
+      - name: upload fresh ipadecrypt-helper-arm64
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: helper.arm64
-          path: helper/dist/helper.arm64
+          name: ipadecrypt-helper-arm64
+          path: helper/dist/ipadecrypt-helper-arm64
           if-no-files-found: ignore
 
-      - name: verify no drift vs committed helper.arm64
+      - name: verify no drift vs committed ipadecrypt-helper-arm64
         run: |
-          fresh=$(sha256sum helper/dist/helper.arm64 | awk '{print $1}')
-          committed=$(sha256sum internal/device/helper.arm64 | awk '{print $1}')
+          fresh=$(sha256sum helper/dist/ipadecrypt-helper-arm64 | awk '{print $1}')
+          committed=$(sha256sum internal/device/ipadecrypt-helper-arm64 | awk '{print $1}')
           echo "fresh:     $fresh"
           echo "committed: $committed"
           if [ "$fresh" != "$committed" ]; then
-            echo "::error::helper.arm64 drift - rebuild via ./helper/build.sh and commit internal/device/helper.arm64"
+            echo "::error::ipadecrypt-helper-arm64 drift - rebuild via ./helper/build.sh and commit internal/device/ipadecrypt-helper-arm64"
             exit 1
           fi
