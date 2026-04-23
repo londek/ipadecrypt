@@ -674,7 +674,7 @@ func buildInstallPlan(dev *device.Client, uploadPath string) (installPlan, error
 		helperPath:    helperPath,
 		appinstPath:   appinstPath,
 		bundlePath:    bundlePath,
-		stagingRemote: filepath.ToSlash(filepath.Join(device.RemoteRoot, "staging", filepath.Base(uploadPath))),
+		stagingRemote: path.Join(device.RemoteRoot, "staging", filepath.Base(uploadPath)),
 	}, nil
 }
 
@@ -696,7 +696,7 @@ func ensureInstalledBundle(dev *device.Client, plan installPlan, uploadPath stri
 			return installResult{}, fmt.Errorf("hash ipa: %w", err)
 		}
 
-		remoteExec := filepath.ToSlash(filepath.Join(plan.bundlePath, execName))
+		remoteExec := path.Join(plan.bundlePath, execName)
 		notify(installHashInstalled)
 		gotSum, err := dev.HashFile(plan.helperPath, remoteExec)
 		if err != nil {
@@ -754,9 +754,7 @@ func installUploadedBundle(dev *device.Client, plan installPlan, uploadPath stri
 }
 
 func remoteOutputPath(bundleID, version string) string {
-	return filepath.ToSlash(
-		filepath.Join(device.RemoteRoot, "work", fmt.Sprintf("%s_%s.ipa", bundleID, version)),
-	)
+	return path.Join(device.RemoteRoot, "work", fmt.Sprintf("%s_%s.ipa", bundleID, version))
 }
 
 func localOutputPath(override, bundleID, version string) (string, error) {
@@ -845,28 +843,28 @@ func (p *helperProgress) HandleEvent(ev device.Event) helperUpdate {
 			}
 			return helperUpdate{note: fmt.Sprintf("bundle done (%s)", pluralize(extras, "framework"))}
 		case "skipped":
-			return helperUpdate{note: fmt.Sprintf("bundle skipped: %s (%s)", filepath.Base(ev.Attr("src")), ev.Attr("reason"))}
+			return helperUpdate{note: fmt.Sprintf("bundle skipped: %s (%s)", path.Base(ev.Attr("src")), ev.Attr("reason"))}
 		}
 
 	case "spawn_chmod":
-		return helperUpdate{note: fmt.Sprintf("chmod +x %s (was mode %s)", filepath.Base(ev.Attr("path")), ev.Attr("old_mode"))}
+		return helperUpdate{note: fmt.Sprintf("chmod +x %s (was mode %s)", path.Base(ev.Attr("path")), ev.Attr("old_mode"))}
 
 	case "spawn_path":
 		if ev.Attr("path") == "ptrace" {
-			return helperUpdate{note: fmt.Sprintf("spawned %s via ptrace fallback", filepath.Base(ev.Attr("exec")))}
+			return helperUpdate{note: fmt.Sprintf("spawned %s via ptrace fallback", path.Base(ev.Attr("exec")))}
 		}
 		return helperUpdate{}
 
 	case "spawn_path_fallback":
-		return helperUpdate{note: fmt.Sprintf("%s failed on %s, falling back", ev.Attr("from"), filepath.Base(ev.Attr("exec")))}
+		return helperUpdate{note: fmt.Sprintf("%s failed on %s, falling back", ev.Attr("from"), path.Base(ev.Attr("exec")))}
 
 	case "dyld":
 		if ev.Attr("phase") == "resuming" {
-			return helperUpdate{spin: fmt.Sprintf("running %s so dyld binds frameworks", filepath.Base(ev.Attr("src")))}
+			return helperUpdate{spin: fmt.Sprintf("running %s so dyld binds frameworks", path.Base(ev.Attr("src")))}
 		}
 
 	case "spawn_failed":
-		return helperUpdate{note: fmt.Sprintf("could not spawn %s (skipped)", filepath.Base(ev.Attr("src")))}
+		return helperUpdate{note: fmt.Sprintf("could not spawn %s (skipped)", path.Base(ev.Attr("src")))}
 
 	case "image":
 		name := ev.Attr("name")
@@ -896,11 +894,11 @@ func (p *helperProgress) HandleEvent(ev device.Event) helperUpdate {
 	case "pack":
 		switch ev.Attr("phase") {
 		case "start":
-			return helperUpdate{spin: fmt.Sprintf("packaging IPA → %s", filepath.Base(ev.Attr("ipa")))}
+			return helperUpdate{spin: fmt.Sprintf("packaging IPA → %s", path.Base(ev.Attr("ipa")))}
 		case "done":
-			return helperUpdate{note: fmt.Sprintf("packaged → %s", filepath.Base(ev.Attr("ipa")))}
+			return helperUpdate{note: fmt.Sprintf("packaged → %s", path.Base(ev.Attr("ipa")))}
 		case "failed":
-			return helperUpdate{note: fmt.Sprintf("pack failed → %s", filepath.Base(ev.Attr("ipa")))}
+			return helperUpdate{note: fmt.Sprintf("pack failed → %s", path.Base(ev.Attr("ipa")))}
 		}
 
 	case "done":
