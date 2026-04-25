@@ -20,7 +20,7 @@ Steps to reproduce the behavior:
 **Expected behavior**
 A clear and concise description of what you expected to happen.
 
-**System information**
+**Environment**
 - Jailbreak type and version
 - iOS version
 - iDevice model
