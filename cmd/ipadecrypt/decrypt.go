@@ -888,6 +888,9 @@ func (p *helperProgress) HandleEvent(ev device.Event) helperUpdate {
 				spin: fmt.Sprintf("decrypted %d image(s)", p.dumpedTotal.Load()),
 			}
 		case "failed":
+			if reason := ev.Attr("reason"); reason != "" {
+				return helperUpdate{note: fmt.Sprintf("failed to decrypt %s (%s)", pretty, reason)}
+			}
 			return helperUpdate{note: fmt.Sprintf("failed to decrypt %s", pretty)}
 		}
 
