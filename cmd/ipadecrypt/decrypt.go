@@ -251,11 +251,16 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 			}
 
 			if idx == 0 {
+				live = tui.NewLive()
+				live.Spin("preparing helper")
+
 				helperPath, err := dev.EnsureHelper()
 				if err != nil {
-					tui.Err("helper upload: %v", err)
+					live.Fail("helper upload: %v", err)
 					return
 				}
+
+				live.OK("helper ready")
 
 				runDecryptOnBundle(dev, helperPath, target.bundleId, installedPath, version, "")
 
@@ -382,18 +387,20 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		tui.OK("stripped %d Watch/ entries", patch.watchStripped)
 	}
 
+	live = tui.NewLive()
+	live.Spin("preparing install plan")
+
 	plan, err := buildInstallPlan(dev, patch.uploadPath)
 	if err != nil {
 		switch {
 		case errors.Is(err, errAppinstNotFound):
-			tui.Err("appinst not found on device - run `ipadecrypt bootstrap`")
+			live.Fail("appinst not found on device - run `ipadecrypt bootstrap`")
 		default:
-			tui.Err("prepare install: %v", err)
+			live.Fail("prepare install: %v", err)
 		}
 		return
 	}
 
-	live = tui.NewLive()
 	if plan.bundlePath == "" {
 		live.Spin("preparing install")
 	} else {

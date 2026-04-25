@@ -5,11 +5,6 @@ import (
 	"time"
 )
 
-// progressReader / progressWriter are caller-side wrappers used to report
-// transfer progress for device.Upload / device.Download. The device package
-// keeps no progress state — callers stat first to know total, wrap with these,
-// and throttle UI updates here.
-
 const progressTick = 100 * time.Millisecond
 
 type progressReader struct {
