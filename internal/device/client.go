@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/londek/ipadecrypt/internal/config"
@@ -224,19 +225,52 @@ func (c *Client) Upload(local, remote string, onProgress func(cur, total int64))
 	if err != nil {
 		return fmt.Errorf("create %s: %w", remote, err)
 	}
-	defer dst.Close()
 
-	w := io.Writer(dst)
-	if onProgress != nil {
-		w = &progressWriter{w: dst, total: total, onProgress: onProgress}
+	var n int64
+	if onProgress == nil {
+		n, err = dst.ReadFromWithConcurrency(src, 0)
+	} else {
+		cr := &countingReader{r: src}
+
+		type uploadResult struct {
+			n   int64
+			err error
+		}
+
+		done := make(chan uploadResult, 1)
+		go func() {
+			n, err := dst.ReadFromWithConcurrency(cr, 0)
+			done <- uploadResult{n: n, err: err}
+		}()
+
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+
+	loop:
+		for {
+			select {
+			case res := <-done:
+				n, err = res.n, res.err
+				break loop
+			case <-ticker.C:
+				onProgress(cr.read.Load(), total)
+			}
+		}
 	}
 
-	if _, err := io.Copy(w, src); err != nil {
+	if err != nil {
+		dst.Close()
+		c.Remove(remote)
 		return fmt.Errorf("upload %s: %w", remote, err)
 	}
 
+	if err := dst.Close(); err != nil {
+		c.Remove(remote)
+		return fmt.Errorf("close %s: %w", remote, err)
+	}
+
 	if onProgress != nil {
-		onProgress(total, total)
+		onProgress(n, total)
 	}
 
 	return nil
@@ -323,6 +357,20 @@ func (p *progressWriter) Write(b []byte) (int, error) {
 	if now.Sub(p.last) >= 100*time.Millisecond {
 		p.last = now
 		p.onProgress(p.written, p.total)
+	}
+	return n, err
+}
+
+// countingReader tracks bytes consumed from r.
+type countingReader struct {
+	r    io.Reader
+	read atomic.Int64
+}
+
+func (p *countingReader) Read(b []byte) (int, error) {
+	n, err := p.r.Read(b)
+	if n > 0 {
+		p.read.Add(int64(n))
 	}
 	return n, err
 }
