@@ -836,10 +836,10 @@ func cleanupDecrypt(dev *device.Client, noCleanup bool, stagingRemote, outRemote
 	}
 
 	if stagingRemote != "" {
-		os.Remove(stagingRemote)
+		dev.Remove(stagingRemote)
 	}
 	if outRemote != "" {
-		os.Remove(outRemote)
+		dev.Remove(outRemote)
 	}
 }
 
