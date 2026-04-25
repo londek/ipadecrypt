@@ -193,8 +193,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 	dev, err := device.Connect(context.Background(), cfg.Device)
 	if err != nil {
-		live.Fail("ssh connect failed")
-		tui.Err("ssh: %v", err)
+		live.Fail("ssh connect failed: %v", err)
 		return
 	}
 
@@ -204,8 +203,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 	probe, err := dev.Probe()
 	if err != nil {
-		live.Fail("probe failed")
-		tui.Err("probe device: %v", err)
+		live.Fail("probe failed: %v", err)
 		return
 	}
 
@@ -222,8 +220,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		live.Spin("checking if %s is installed", target.bundleId)
 		installedPath, err := dev.FindInstalledByBundleID(target.bundleId)
 		if err != nil {
-			live.Fail("scan failed")
-			tui.Err("scan installed: %v", err)
+			live.Fail("scan failed: %v", err)
 			return
 		}
 
@@ -309,8 +306,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 		app, err := lookupTargetApp(as, cfg.Apple.Account, target)
 		if err != nil {
-			live.Fail("lookup failed")
-			tui.Err("lookup: %v", err)
+			live.Fail("lookup failed: %v", err)
 			return
 		}
 
@@ -339,13 +335,11 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		})
 		if err != nil {
 			if errors.Is(err, errRemoteDownloadFailed) {
-				live.Fail("download failed")
-				tui.Err("download: %v", errors.Unwrap(err))
+				live.Fail("download failed: %v", errors.Unwrap(err))
 				return
 			}
 
-			live.Fail("prepare failed")
-			tui.Err("prepare: %v", err)
+			live.Fail("prepare failed: %v", err)
 			return
 		}
 
@@ -369,8 +363,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 	patch, err := patchSourceForDevice(encPath, probe.IOSVersion)
 	if err != nil {
-		live.Fail("patch MinimumOSVersion failed")
-		tui.Err("patch MinimumOSVersion: %v", err)
+		live.Fail("patch MinimumOSVersion failed: %v", err)
 		return
 	}
 	defer func() {
@@ -429,8 +422,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		live.Progress(cur, total)
 	})
 	if err != nil {
-		live.Fail("install failed")
-		tui.Err("install: %v", err)
+		live.Fail("install failed: %v", err)
 		return
 	}
 
@@ -481,6 +473,7 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 		live.Fail("helper run: %v", err)
 		return
 	}
+
 	if code != 0 {
 		live.Fail("helper exit %d", code)
 		return
@@ -495,26 +488,23 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 	}
 
 	live = tui.NewLive()
+
 	live.Spin("pulling → %s", filepath.Base(outLocal))
+
 	if err := dev.Download(outRemote, outLocal, func(cur, total int64) {
 		live.Message("%s", transferProgressText(fmt.Sprintf("pulling → %s", filepath.Base(outLocal)), cur, total))
 		live.Progress(cur, total)
 	}); err != nil {
-		live.Fail("pull failed")
-		tui.Err("pull: %v", err)
+		live.Fail("pull failed: %v", err)
 		return
 	}
 
 	if !decryptKeepMetadata {
 		live.Spin("stripping iTunesMetadata.plist")
-		removed, err := pipeline.StripMetadata(outLocal)
-		if err != nil {
-			live.Fail("strip metadata failed")
-			tui.Err("strip metadata: %v", err)
+
+		if _, err := pipeline.StripMetadata(outLocal); err != nil {
+			live.Fail("strip metadata failed: %v", err)
 			return
-		}
-		if removed {
-			live.Note("removed iTunesMetadata.plist")
 		}
 	}
 
@@ -522,8 +512,7 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 		live.Spin("stripping Watch/")
 
 		if _, err := pipeline.StripWatch(outLocal); err != nil {
-			live.Fail("strip watch failed")
-			tui.Err("strip watch: %v", err)
+			live.Fail("strip watch failed: %v", err)
 			return
 		}
 	}
@@ -535,8 +524,7 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 		live.Spin("checking cryptid on every Mach-O")
 		res, verr := pipeline.VerifyCryptid(outLocal)
 		if verr != nil {
-			live.Fail("verify failed")
-			tui.Err("verify: %v", verr)
+			live.Fail("verify failed: %v", verr)
 			return
 		}
 		if len(res.Encrypted) > 0 {
