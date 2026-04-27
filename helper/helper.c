@@ -303,6 +303,11 @@ static int select_runtime_slice(const char *path,
         struct fat_header fh;
         memcpy(&fh, base, sizeof(fh));
         uint32_t nfat = swap ? OSSwapBigToHostInt32(fh.nfat_arch) : fh.nfat_arch;
+        uint64_t arch_size = is_fat64 ? sizeof(struct fat_arch_64)
+                                      : sizeof(struct fat_arch);
+        if (nfat == 0 || nfat > (file_sz - sizeof(struct fat_header)) / arch_size) {
+            rc = -1; goto done;
+        }
 
         out->is_fat = 1;
         for (uint32_t i = 0; i < nfat; i++) {
@@ -386,6 +391,36 @@ static int rm_rf(const char *path) {
     return unlink(path);
 }
 
+static int write_all(int fd, const void *buf, size_t len) {
+    const uint8_t *p = buf;
+    while (len > 0) {
+        ssize_t n = write(fd, p, len);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (n == 0) { errno = EIO; return -1; }
+        p += n;
+        len -= (size_t)n;
+    }
+    return 0;
+}
+
+static int read_full(int fd, void *buf, size_t len) {
+    uint8_t *p = buf;
+    while (len > 0) {
+        ssize_t n = read(fd, p, len);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (n == 0) { errno = EIO; return -1; }
+        p += n;
+        len -= (size_t)n;
+    }
+    return 0;
+}
+
 static int copy_file(const char *src, const char *dst) {
     int in = open(src, O_RDONLY);
     if (in < 0) return -1;
@@ -394,9 +429,12 @@ static int copy_file(const char *src, const char *dst) {
     int out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, st.st_mode & 0777);
     if (out < 0) { close(in); return -1; }
     char buf[64 * 1024];
-    ssize_t n;
-    while ((n = read(in, buf, sizeof(buf))) > 0) {
-        if (write(out, buf, n) != n) { close(in); close(out); return -1; }
+    ssize_t n = 0;
+    for (;;) {
+        n = read(in, buf, sizeof(buf));
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        if (write_all(out, buf, (size_t)n) != 0) { close(in); close(out); return -1; }
     }
     close(in); close(out);
     return n < 0 ? -1 : 0;
@@ -698,6 +736,7 @@ static int find_main_base(task_t task, mach_vm_address_t *out) {
             *out = addr;
             return 0;
         }
+        if (sz == 0 || addr + sz <= addr) return -1;
         addr += sz;
     }
 }
@@ -816,7 +855,7 @@ static dump_result_t write_output(const char *dst, const uint8_t *buf,
 
     const uint8_t *p = sel->is_fat ? buf + sel->selected.slice.slice_offset : buf;
     size_t n = sel->is_fat ? (size_t)sel->selected.slice.slice_size : file_sz;
-    if (write(fd, p, n) != (ssize_t)n) {
+    if (write_all(fd, p, n) != 0) {
         ERR("write dst %s: %s", dst, strerror(errno));
         close(fd); return DUMP_WRITE_DST_FAIL;
     }
@@ -838,7 +877,7 @@ static dump_result_t dump_image(const char *src, const char *dst, task_t task,
     size_t file_sz = (size_t)st.st_size;
     uint8_t *buf = malloc(file_sz);
     if (!buf) { close(fd); return DUMP_OOM; }
-    if (read(fd, buf, file_sz) != (ssize_t)file_sz) {
+    if (read_full(fd, buf, file_sz) != 0) {
         ERR("read %s: %s", src, strerror(errno));
         free(buf); close(fd); return DUMP_READ_SRC_FAIL;
     }
@@ -870,11 +909,17 @@ static dump_result_t dump_image(const char *src, const char *dst, task_t task,
 static mach_port_t make_exception_port(task_t task) {
     mach_port_t port = MACH_PORT_NULL;
     if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port) != KERN_SUCCESS) return MACH_PORT_NULL;
-    mach_port_insert_right(mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND);
-    task_set_exception_ports(task,
+    if (mach_port_insert_right(mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND) != KERN_SUCCESS) {
+        mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_RECEIVE, -1);
+        return MACH_PORT_NULL;
+    }
+    if (task_set_exception_ports(task,
         EXC_MASK_CRASH | EXC_MASK_BAD_ACCESS | EXC_MASK_BAD_INSTRUCTION |
         EXC_MASK_SOFTWARE | EXC_MASK_ARITHMETIC | EXC_MASK_BREAKPOINT,
-        port, EXCEPTION_DEFAULT, ARM_THREAD_STATE64);
+        port, EXCEPTION_DEFAULT, ARM_THREAD_STATE64) != KERN_SUCCESS) {
+        mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_RECEIVE, -1);
+        return MACH_PORT_NULL;
+    }
     return port;
 }
 

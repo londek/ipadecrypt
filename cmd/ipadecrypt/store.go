@@ -38,17 +38,17 @@ func reauth(cfg *config.Config, as *appstore.Client) error {
 // entry). Handles mid-purchase token expiry by re-authenticating once and
 // retrying. ErrLicenseAlreadyExists is treated as success.
 func acquireLicense(cfg *config.Config, as *appstore.Client, app appstore.App) error {
-	perr := as.Purchase(cfg.Apple.Account, app)
-	if errors.Is(perr, appstore.ErrPasswordTokenExpired) {
-		if rerr := reauth(cfg, as); rerr != nil {
-			return rerr
+	err := as.Purchase(cfg.Apple.Account, app)
+	if errors.Is(err, appstore.ErrPasswordTokenExpired) {
+		if err := reauth(cfg, as); err != nil {
+			return err
 		}
 
-		perr = as.Purchase(cfg.Apple.Account, app)
+		err = as.Purchase(cfg.Apple.Account, app)
 	}
 
-	if perr != nil && !errors.Is(perr, appstore.ErrLicenseAlreadyExists) {
-		return fmt.Errorf("purchase: %w", perr)
+	if err != nil && !errors.Is(err, appstore.ErrLicenseAlreadyExists) {
+		return fmt.Errorf("purchase: %w", err)
 	}
 
 	return nil
@@ -76,8 +76,8 @@ func withAuth[T any](cfg *config.Config, as *appstore.Client, app appstore.App, 
 		case errors.Is(err, appstore.ErrPasswordTokenExpired):
 			notify(authReauth)
 
-			if rerr := reauth(cfg, as); rerr != nil {
-				return zero, rerr
+			if err := reauth(cfg, as); err != nil {
+				return zero, err
 			}
 
 			notify(authRetryingDownload)
@@ -85,8 +85,8 @@ func withAuth[T any](cfg *config.Config, as *appstore.Client, app appstore.App, 
 		case errors.Is(err, appstore.ErrLicenseRequired):
 			notify(authLicense)
 
-			if lerr := acquireLicense(cfg, as, app); lerr != nil {
-				return zero, lerr
+			if err := acquireLicense(cfg, as, app); err != nil {
+				return zero, err
 			}
 
 			notify(authRetryingDownload)

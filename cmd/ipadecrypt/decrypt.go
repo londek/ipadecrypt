@@ -107,13 +107,19 @@ func parseDecryptArg(raw string) (decryptTarget, error) {
 
 	// Local .ipa path
 	if strings.HasSuffix(strings.ToLower(raw), ".ipa") {
-		if info, err := os.Stat(raw); err == nil && !info.IsDir() {
-			abs, aerr := filepath.Abs(raw)
-			if aerr != nil {
-				return decryptTarget{}, aerr
-			}
-			return decryptTarget{localPath: abs}, nil
+		info, err := os.Stat(raw)
+		if err != nil {
+			return decryptTarget{}, fmt.Errorf("local IPA %s: %w", raw, err)
 		}
+		if info.IsDir() {
+			return decryptTarget{}, fmt.Errorf("local IPA %s is a directory", raw)
+		}
+
+		abs, err := filepath.Abs(raw)
+		if err != nil {
+			return decryptTarget{}, err
+		}
+		return decryptTarget{localPath: abs}, nil
 	}
 
 	// Bare numeric string: App Store track ID (e.g. "544007664").
@@ -556,9 +562,9 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 	if !decryptNoVerify {
 		live = tui.NewLive()
 		live.Spin("checking cryptid on every Mach-O")
-		res, verr := pipeline.VerifyCryptid(outLocal)
-		if verr != nil {
-			live.Fail("verify failed: %v", verr)
+		res, err := pipeline.VerifyCryptid(outLocal)
+		if err != nil {
+			live.Fail("verify failed: %v", err)
 			return
 		}
 		if len(res.Encrypted) > 0 {
@@ -697,7 +703,7 @@ func buildInstallPlan(dev *device.Client, uploadPath string) (installPlan, error
 		return installPlan{}, errAppinstNotFound
 	}
 
-	bundlePath, err := dev.FindInstalled(helperPath, appDirName)
+	bundlePath, err := dev.FindInstalled(appDirName)
 	if err != nil {
 		return installPlan{}, fmt.Errorf("scan installed: %w", err)
 	}
@@ -730,7 +736,7 @@ func ensureInstalledBundle(dev *device.Client, plan installPlan, uploadPath stri
 
 		remoteExec := path.Join(plan.bundlePath, execName)
 		notify(installHashInstalled)
-		gotSum, err := dev.HashFile(plan.helperPath, remoteExec)
+		gotSum, err := dev.HashFile(remoteExec)
 		if err != nil {
 			return installResult{}, fmt.Errorf("hash device: %w", err)
 		}
@@ -785,7 +791,7 @@ func installUploadedBundle(dev *device.Client, plan installPlan, uploadPath stri
 
 	notify(installRescan)
 
-	bundlePath, err := dev.FindInstalled(plan.helperPath, appDirName)
+	bundlePath, err := dev.FindInstalled(appDirName)
 	if err != nil {
 		return installResult{}, fmt.Errorf("post-install scan: %w", err)
 	}
@@ -823,7 +829,8 @@ func localOutputPath(override, bundleID, version string) (string, error) {
 	}
 
 	// if override is just a directory (not a full file path), place the default filename inside it
-	if info, serr := os.Stat(abs); serr == nil && info.IsDir() {
+	info, err := os.Stat(abs)
+	if err == nil && info.IsDir() {
 		return filepath.Join(abs, defaultName), nil
 	}
 

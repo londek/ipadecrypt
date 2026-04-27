@@ -58,48 +58,45 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 	}
 
 	var (
-		acc      *appstore.Account
+		account  *appstore.Account
 		authCode string
-		signedIn bool
 	)
-	for attempt := 0; attempt < 3 && !signedIn; attempt++ {
+	for attempt := 0; attempt < 3 && account == nil; attempt++ {
 		live := tui.NewLive()
 		live.Spin("authenticating")
 
-		a, lerr := as.Login(cfg.Apple.Email, cfg.Apple.Password, authCode)
+		account, err = as.Login(cfg.Apple.Email, cfg.Apple.Password, authCode)
 		switch {
-		case errors.Is(lerr, appstore.ErrAuthCodeRequired):
+		case errors.Is(err, appstore.ErrAuthCodeRequired):
 			live.Stop()
 
-			code, perr := tui.Prompt("Apple sent a 6-digit code - enter it")
-			if perr != nil {
+			code, err := tui.Prompt("Apple sent a 6-digit code - enter it")
+			if err != nil {
 				return
 			}
 
 			authCode = strings.TrimSpace(code)
 
-		case lerr != nil:
-			live.Fail("login failed: %v", lerr)
+		case err != nil:
+			live.Fail("login failed: %v", err)
 			return
 
 		default:
 			live.OK("authenticated")
-			acc = a
-			signedIn = true
 		}
 	}
 
-	if !signedIn {
+	if account == nil {
 		tui.Err("login: 3 two-factor attempts failed")
 		return
 	}
 
-	cfg.Apple.Account = acc
+	cfg.Apple.Account = account
 
 	tui.Fields(
-		"Apple ID", acc.Email,
-		"Name", acc.Name,
-		"Storefront", acc.StoreFront,
+		"Apple ID", account.Email,
+		"Name", account.Name,
+		"Storefront", account.StoreFront,
 	)
 
 	if err := cfg.Save(); err != nil {
@@ -251,13 +248,13 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 		// Fresh SSH connection each iteration so a reboot mid-bootstrap is safe.
 		printed := 0
 		missing := 0
-		var connErr error
+		connectionFailed := false
 
-		pdev, perr := device.Connect(context.Background(), cfg.Device)
-		if perr != nil {
-			tui.Err("ssh connect failed: %v", perr)
+		pdev, err := device.Connect(context.Background(), cfg.Device)
+		if err != nil {
+			tui.Err("ssh connect failed: %v", err)
 			printed = 1
-			connErr = perr
+			connectionFailed = true
 		} else {
 			checks := []struct {
 				name  string
@@ -284,18 +281,18 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 			pdev.Close()
 		}
 
-		if connErr == nil && missing == 0 {
+		if !connectionFailed && missing == 0 {
 			break
 		}
 
-		if perr := tui.PressEnter(prompt); perr != nil {
+		if err := tui.PressEnter(prompt); err != nil {
 			return
 		}
 
 		// Status rows + prompt row + Enter-echo row.
 		prevLines = printed + 2
 
-		if connErr != nil {
+		if connectionFailed {
 			prompt = "press Enter to retry"
 		} else {
 			prompt = fmt.Sprintf("%d missing - press Enter to retry", missing)

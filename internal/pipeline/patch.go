@@ -43,7 +43,6 @@ func PatchForInstall(src, dst, target string, keepWatch bool) (PatchResult, erro
 	defer out.Close()
 
 	w := zip.NewWriter(out)
-	defer w.Close()
 
 	for _, f := range r.File {
 		if !keepWatch && isWatchPath(f.Name) {
@@ -66,6 +65,10 @@ func PatchForInstall(src, dst, target string, keepWatch bool) (PatchResult, erro
 		if err := copyEntry(f, w); err != nil {
 			return res, fmt.Errorf("copy %s: %w", f.Name, err)
 		}
+	}
+
+	if err := w.Close(); err != nil {
+		return res, fmt.Errorf("close zip: %w", err)
 	}
 
 	return res, nil
@@ -110,7 +113,7 @@ func rewriteInfoPlist(f *zip.File, target string, w *zip.Writer) (bool, string, 
 		return false, "", err
 	}
 
-	var m map[string]interface{}
+	var m map[string]any
 	format, err := plist.Unmarshal(data, &m)
 	if err != nil {
 		// Not a parseable plist at this path; pass through unchanged.
@@ -252,7 +255,7 @@ func AppInfo(ipaPath string) (bundleID, version string, err error) {
 
 		bundleID, _ = m["CFBundleIdentifier"].(string)
 		if bundleID == "" {
-			return "", "", fmt.Errorf("Info.plist missing CFBundleIdentifier")
+			return "", "", fmt.Errorf("missing CFBundleIdentifier in Info.plist")
 		}
 
 		return bundleID, version, nil

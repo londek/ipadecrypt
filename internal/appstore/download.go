@@ -128,12 +128,7 @@ func (c *Client) PrepareDownload(acc *Account, app App, externalVersionID string
 		return DownloadTicket{}, err
 	}
 
-	return DownloadTicket{
-		URL:       item.URL,
-		Sinfs:     item.Sinfs,
-		Metadata:  item.Metadata,
-		AssetInfo: item.AssetInfo,
-	}, nil
+	return DownloadTicket(item), nil
 }
 
 // volumeDownload is the shared POST to the volumeStoreDownloadProduct
@@ -197,9 +192,6 @@ func (c *Client) volumeDownload(acc *Account, app App, externalVersionID string)
 	return out.Items[0], nil
 }
 
-// CompleteDownload fetches the IPA described by `ticket` into outPath,
-// injects iTunesMetadata.plist, and replicates sinfs. outPath must be a
-// file path, not a directory.
 // CompleteDownload fetches the IPA described by `ticket` into outPath.
 // If onProgress is non-nil it is called periodically (throttled to
 // ~100ms) during the CDN fetch with the running byte count and
@@ -208,10 +200,13 @@ func (c *Client) CompleteDownload(acc *Account, ticket DownloadTicket, outPath s
 	if outPath == "" {
 		return DownloadOutput{}, errors.New("download: outPath is required (must be a file path)")
 	}
-	if info, err := os.Stat(outPath); err == nil && info.IsDir() {
-		return DownloadOutput{}, fmt.Errorf("download: outPath %q is a directory; CompleteDownload expects a file path", outPath)
-	} else if err != nil && !os.IsNotExist(err) {
+
+	info, err := os.Stat(outPath)
+	if err != nil && !os.IsNotExist(err) {
 		return DownloadOutput{}, fmt.Errorf("download: stat outPath: %w", err)
+	}
+	if err == nil && info.IsDir() {
+		return DownloadOutput{}, fmt.Errorf("download: outPath %q is a directory; CompleteDownload expects a file path", outPath)
 	}
 
 	item := downloadItem{
@@ -261,6 +256,25 @@ func fetchToFile(hc *http.Client, url, dst string, total int64, onProgress func(
 	}
 
 	defer res.Body.Close()
+
+	switch {
+	case resumeFrom > 0 && res.StatusCode == http.StatusPartialContent:
+		if _, err := f.Seek(resumeFrom, io.SeekStart); err != nil {
+			return fmt.Errorf("seek %s: %w", dst, err)
+		}
+	case res.StatusCode == http.StatusOK:
+		if resumeFrom > 0 {
+			if err := f.Truncate(0); err != nil {
+				return fmt.Errorf("truncate %s: %w", dst, err)
+			}
+			if _, err := f.Seek(0, io.SeekStart); err != nil {
+				return fmt.Errorf("seek %s: %w", dst, err)
+			}
+			resumeFrom = 0
+		}
+	default:
+		return fmt.Errorf("fetch: status %d", res.StatusCode)
+	}
 
 	// Prefer the ticket-reported size when available; fall back to
 	// Content-Length adjusted for any Range resume.
@@ -327,8 +341,6 @@ func applyPatches(src, dst string, item downloadItem, acc *Account) error {
 
 	zw := zip.NewWriter(df)
 
-	defer zw.Close()
-
 	for _, f := range zr.File {
 		if err := copyZipEntry(f, zw); err != nil {
 			return err
@@ -360,26 +372,31 @@ func applyPatches(src, dst string, item downloadItem, acc *Account) error {
 				return err
 			}
 		}
+	} else {
+		info, err := readInfo(zr)
+		if err != nil {
+			return err
+		}
 
-		return nil
+		if info == nil {
+			return errors.New("no Info.plist in package")
+		}
+
+		if len(item.Sinfs) == 0 {
+			return errors.New("no sinfs in download response")
+		}
+
+		entry := fmt.Sprintf("Payload/%s.app/SC_Info/%s.sinf", bundleName, info.BundleExecutable)
+		if err := writeEntry(zw, entry, item.Sinfs[0].Data); err != nil {
+			return err
+		}
 	}
 
-	info, err := readInfo(zr)
-	if err != nil {
-		return err
+	if err := zw.Close(); err != nil {
+		return fmt.Errorf("close zip: %w", err)
 	}
 
-	if info == nil {
-		return errors.New("no Info.plist in package")
-	}
-
-	if len(item.Sinfs) == 0 {
-		return errors.New("no sinfs in download response")
-	}
-
-	entry := fmt.Sprintf("Payload/%s.app/SC_Info/%s.sinf", bundleName, info.BundleExecutable)
-
-	return writeEntry(zw, entry, item.Sinfs[0].Data)
+	return nil
 }
 
 func copyZipEntry(f *zip.File, zw *zip.Writer) error {
@@ -413,11 +430,15 @@ func writeEntry(zw *zip.Writer, name string, data []byte) error {
 	return err
 }
 
-func writeMetadataEntry(zw *zip.Writer, metadata map[string]interface{}, acc *Account) error {
-	metadata["apple-id"] = acc.Email
-	metadata["userName"] = acc.Email
+func writeMetadataEntry(zw *zip.Writer, metadata map[string]any, acc *Account) error {
+	out := make(map[string]any, len(metadata)+2)
+	for k, v := range metadata {
+		out[k] = v
+	}
+	out["apple-id"] = acc.Email
+	out["userName"] = acc.Email
 
-	data, err := plist.Marshal(metadata, plist.BinaryFormat)
+	data, err := plist.Marshal(out, plist.BinaryFormat)
 	if err != nil {
 		return fmt.Errorf("marshal iTunesMetadata: %w", err)
 	}

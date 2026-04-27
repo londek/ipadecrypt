@@ -155,7 +155,7 @@ func (c *Client) EnsureHelper() (string, error) {
 // /var/containers are readable only by root + _installd, hence sudo. Relies
 // on a `shasum` binary being on PATH (procursus/dopamine/palera1n all ship
 // it at /var/jb/usr/bin/shasum).
-func (c *Client) HashFile(_unused, target string) (string, error) {
+func (c *Client) HashFile(target string) (string, error) {
 	// procursus (Dopamine + palera1n) ships sha256sum (from coreutils) and
 	// shasum (perl). Try both. Output is `<hex>  <path>`; cut first field.
 	cmd := fmt.Sprintf(
@@ -216,10 +216,6 @@ func (c *Client) InstalledVersion(bundlePath string) (string, error) {
 		return strings.TrimSpace(fmt.Sprintf("%v", version)), nil
 	}
 
-	if out == "" {
-		return "", errors.New("installed version not found")
-	}
-
 	return "", errors.New("installed version not found")
 }
 
@@ -252,7 +248,7 @@ func (c *Client) FindInstalledByBundleID(bundleID string) (string, error) {
 // Installed apps live under /var/containers/Bundle/Application/<uuid>/X.app
 // on rootful and rootless setups alike. Requires sudo because /var/containers
 // is readable only by _installd + root.
-func (c *Client) FindInstalled(_unused, appDirName string) (string, error) {
+func (c *Client) FindInstalled(appDirName string) (string, error) {
 	cmd := fmt.Sprintf(
 		"ls -d /var/containers/Bundle/Application/*/%q 2>/dev/null | head -1",
 		appDirName)
