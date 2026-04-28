@@ -22,6 +22,20 @@ type ProbeResult struct {
 	IOSVersion string
 	Arch       string // "arm64" or "arm64e"
 	Model      string // "iPhone10,2", "iPad7,3", …
+	// DeviceFamily mirrors UIDeviceFamily values from Info.plist:
+	// 1 = iPhone/iPod, 2 = iPad. 0 if unknown.
+	DeviceFamily int
+}
+
+func deviceFamilyFromModel(model string) int {
+	switch {
+	case strings.HasPrefix(model, "iPhone"), strings.HasPrefix(model, "iPod"):
+		return 1
+	case strings.HasPrefix(model, "iPad"):
+		return 2
+	default:
+		return 0
+	}
 }
 
 func (c *Client) Probe() (ProbeResult, error) {
@@ -62,6 +76,8 @@ func (c *Client) Probe() (ProbeResult, error) {
 	if len(lines) > 2 {
 		r.Model = strings.TrimSpace(lines[2])
 	}
+
+	r.DeviceFamily = deviceFamilyFromModel(r.Model)
 
 	return r, nil
 }

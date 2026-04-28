@@ -33,11 +33,14 @@ type decryptTarget struct {
 }
 
 type patchResult struct {
-	uploadPath    string
-	patchedPath   string
-	changed       bool
-	previousMinOS string
-	watchStripped int
+	uploadPath           string
+	patchedPath          string
+	changed              bool
+	previousMinOS        string
+	watchStripped        int
+	deviceFamilyExpanded bool
+	previousDeviceFamily []int
+	newDeviceFamily      []int
 }
 
 type installPlan struct {
@@ -382,8 +385,14 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 	live = tui.NewLive()
 	live.Spin("patching Info.plist for MinimumOSVersion %s", probe.IOSVersion)
 
-	patch, err := patchSourceForDevice(encPath, probe.IOSVersion)
+	patch, err := patchSourceForDevice(encPath, probe.IOSVersion, probe.DeviceFamily, decryptPatchDevType)
 	if err != nil {
+		var dfErr *pipeline.ErrDeviceFamilyMismatch
+		if errors.As(err, &dfErr) {
+			live.Fail("device family mismatch: app supports %v, device is %d (%s) — pass --patch-device-type to install anyway",
+				dfErr.Supported, dfErr.Device, pipeline.DeviceFamilyName(dfErr.Device))
+			return
+		}
 		live.Fail("patch MinimumOSVersion failed: %v", err)
 		return
 	}
@@ -397,6 +406,10 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		live.OK("MinimumOSVersion %s → %s", patch.previousMinOS, probe.IOSVersion)
 	} else {
 		live.OK("no MinimumOSVersion change needed")
+	}
+
+	if patch.deviceFamilyExpanded {
+		tui.OK("UIDeviceFamily %v → %v", patch.previousDeviceFamily, patch.newDeviceFamily)
 	}
 
 	if patch.watchStripped > 0 {
@@ -658,7 +671,7 @@ func fetchRemoteEncryptedSource(cfg *config.Config, paths *config.Paths, as *app
 	}, nil
 }
 
-func patchSourceForDevice(encPath, iosVersion string) (patchResult, error) {
+func patchSourceForDevice(encPath, iosVersion string, deviceFamily int, patchDeviceType bool) (patchResult, error) {
 	pattern := strings.TrimSuffix(filepath.Base(encPath), ".ipa") + "-patched-*.ipa"
 	f, err := os.CreateTemp("", pattern)
 	if err != nil {
@@ -674,23 +687,26 @@ func patchSourceForDevice(encPath, iosVersion string) (patchResult, error) {
 		return patchResult{}, fmt.Errorf("prepare temp ipa: %w", err)
 	}
 
-	res, err := pipeline.PatchForInstall(encPath, tmp, iosVersion, decryptKeepWatch)
+	res, err := pipeline.PatchForInstall(encPath, tmp, iosVersion, deviceFamily, patchDeviceType, decryptKeepWatch)
 	if err != nil {
 		os.Remove(tmp)
 		return patchResult{}, err
 	}
 
-	if !res.MinOSChanged && res.WatchRemoved == 0 {
+	if !res.MinOSChanged && res.WatchRemoved == 0 && !res.DeviceFamilyExpanded {
 		os.Remove(tmp)
 		return patchResult{uploadPath: encPath}, nil
 	}
 
 	return patchResult{
-		uploadPath:    tmp,
-		patchedPath:   tmp,
-		changed:       res.MinOSChanged,
-		previousMinOS: res.PreviousMinOS,
-		watchStripped: res.WatchRemoved,
+		uploadPath:           tmp,
+		patchedPath:          tmp,
+		changed:              res.MinOSChanged,
+		previousMinOS:        res.PreviousMinOS,
+		watchStripped:        res.WatchRemoved,
+		deviceFamilyExpanded: res.DeviceFamilyExpanded,
+		previousDeviceFamily: res.PreviousDeviceFamily,
+		newDeviceFamily:      res.NewDeviceFamily,
 	}, nil
 }
 

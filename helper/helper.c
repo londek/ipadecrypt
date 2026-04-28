@@ -1029,72 +1029,107 @@ static dump_result_t mmap_dump(const char *src, const char *dst,
     return dr;
 }
 
-// Walk bundle Frameworks/ on disk, dump each encrypted Mach-O the
-// target-task discovery loop didn't cover. Used when dyld in the target
-// aborted before mapping all @rpath deps - typical when the binary
-// strict-links a system swift dylib the device doesn't ship
-static int rescue_unmapped_frameworks(const char *bundle_src, const char *bundle_dst,
-                                      size_t bs_len,
-                                      const runtime_image_t *runtime,
-                                      const char **dumped, int n_dumped) {
-    if (!runtime) return 0;
+// Try to mmap-dump a single Mach-O at <bundle_src>/<rel>. Returns 1 on
+// success, 0 if skipped or failed. Used by the recursive rescue walk.
+static int rescue_try_dump(const char *rel,
+                           const char *bundle_src, const char *bundle_dst,
+                           const runtime_image_t *runtime,
+                           const char **dumped, int n_dumped) {
+    for (int i = 0; i < n_dumped; i++) {
+        if (strcmp(dumped[i], rel) == 0) return 0;
+    }
 
-    char fw_root[4096];
-    snprintf(fw_root, sizeof(fw_root), "%s/Frameworks", bundle_src);
-    DIR *d = opendir(fw_root);
-    if (!d) return 0;
+    char abs_src[4096], abs_dst[4096];
+    snprintf(abs_src, sizeof(abs_src), "%s/%s", bundle_src, rel);
+    snprintf(abs_dst, sizeof(abs_dst), "%s/%s", bundle_dst, rel);
 
-    int rescued = 0;
+    if (!is_macho(abs_src)) return 0;
+
+    selected_slice_t sel;
+    if (select_runtime_slice(abs_src, runtime, &sel) != 1) return 0;
+    if (!slice_needs_dump(&sel)) return 0;
+
+    EVT("event=image phase=start name=\"%s\" kind=framework source=rescue", rel);
+    dump_result_t dr = mmap_dump(abs_src, abs_dst, &sel);
+    if (dr == DUMP_OK) {
+        EVT("event=image phase=done name=\"%s\" kind=framework size=%u source=rescue",
+            rel, sel.selected.crypt.cryptsize);
+        return 1;
+    }
+    EVT("event=image phase=failed name=\"%s\" kind=framework reason=\"%s\" source=rescue",
+        rel, dump_reason(dr));
+    return 0;
+}
+
+// Recursively walk a bundle directory looking for encrypted Mach-Os not
+// already covered by the target-task discovery loop. Skips top-level
+// PlugIns/ and Extensions/ (handled by decrypt_appexes) and the bundle's
+// main exec. Symlinks are not followed, to avoid loops.
+static void rescue_walk(const char *bundle_src, const char *bundle_dst,
+                        const runtime_image_t *runtime,
+                        const char **dumped, int n_dumped,
+                        const char *main_name,
+                        const char *rel_dir, int depth, int *rescued) {
+    char dir_path[4096];
+    if (rel_dir[0])
+        snprintf(dir_path, sizeof(dir_path), "%s/%s", bundle_src, rel_dir);
+    else
+        snprintf(dir_path, sizeof(dir_path), "%s", bundle_src);
+
+    DIR *d = opendir(dir_path);
+    if (!d) return;
     struct dirent *e;
     while ((e = readdir(d))) {
         if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
-        const char *dot = strrchr(e->d_name, '.');
-        if (!dot || strcmp(dot, ".framework") != 0) continue;
 
-        char fw_dir[4096];
-        snprintf(fw_dir, sizeof(fw_dir), "%s/%s", fw_root, e->d_name);
+        // Top-level appex containers handled separately.
+        if (depth == 0 &&
+            (strcmp(e->d_name, "PlugIns") == 0 ||
+             strcmp(e->d_name, "Extensions") == 0))
+            continue;
+
+        char rel[4096];
+        if (rel_dir[0])
+            snprintf(rel, sizeof(rel), "%s/%s", rel_dir, e->d_name);
+        else
+            snprintf(rel, sizeof(rel), "%s", e->d_name);
+
+        char full[4096];
+        snprintf(full, sizeof(full), "%s/%s", dir_path, e->d_name);
+
         struct stat st;
-        if (lstat(fw_dir, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+        if (lstat(full, &st) != 0) continue;
+        if (S_ISLNK(st.st_mode)) continue;
 
-        char fw_name[256];
-        size_t name_len = (size_t)(dot - e->d_name);
-        if (name_len == 0 || name_len >= sizeof(fw_name)) continue;
-        memcpy(fw_name, e->d_name, name_len);
-        fw_name[name_len] = '\0';
-
-        char main_path[4096];
-        snprintf(main_path, sizeof(main_path), "%s/%s", fw_dir, fw_name);
-        if (!is_macho(main_path)) continue;
-
-        selected_slice_t sel;
-        if (select_runtime_slice(main_path, runtime, &sel) != 1) continue;
-        if (!slice_needs_dump(&sel)) continue;
-
-        // rel = path relative to bundle_src ("Frameworks/X.framework/X").
-        if (strncmp(main_path, bundle_src, bs_len) != 0) continue;
-        const char *rel = main_path + bs_len;
-        while (*rel == '/') rel++;
-        int seen = 0;
-        for (int i = 0; i < n_dumped; i++) {
-            if (strcmp(dumped[i], rel) == 0) { seen = 1; break; }
+        if (S_ISDIR(st.st_mode)) {
+            rescue_walk(bundle_src, bundle_dst, runtime, dumped, n_dumped,
+                        main_name, rel, depth + 1, rescued);
+            continue;
         }
-        if (seen) continue;
+        if (!S_ISREG(st.st_mode)) continue;
 
-        EVT("event=image phase=start name=\"%s\" kind=framework source=rescue", rel);
+        // Bundle's main exec lives at <bundle>/<name>; skip at depth 0.
+        if (depth == 0 && main_name && main_name[0] &&
+            strcmp(e->d_name, main_name) == 0) continue;
 
-        char rel_dst[4096];
-        snprintf(rel_dst, sizeof(rel_dst), "%s/%s", bundle_dst, rel);
-        dump_result_t dr = mmap_dump(main_path, rel_dst, &sel);
-        if (dr == DUMP_OK) {
-            rescued++;
-            EVT("event=image phase=done name=\"%s\" kind=framework size=%u source=rescue",
-                rel, sel.selected.crypt.cryptsize);
-        } else {
-            EVT("event=image phase=failed name=\"%s\" kind=framework reason=\"%s\" source=rescue",
-                rel, dump_reason(dr));
-        }
+        if (rescue_try_dump(rel, bundle_src, bundle_dst, runtime,
+                            dumped, n_dumped))
+            (*rescued)++;
     }
     closedir(d);
+}
+
+// Recursively walk the bundle on disk and dump every encrypted Mach-O the
+// target-task discovery loop didn't cover. Catches nested frameworks,
+// embedded toolchains, and Developer/ payloads (e.g. Swift Playgrounds).
+static int rescue_unmapped_frameworks(const char *bundle_src, const char *bundle_dst,
+                                      const runtime_image_t *runtime,
+                                      const char **dumped, int n_dumped,
+                                      const char *main_name) {
+    if (!runtime) return 0;
+    int rescued = 0;
+    rescue_walk(bundle_src, bundle_dst, runtime, dumped, n_dumped,
+                main_name, "", 0, &rescued);
     return rescued;
 }
 
@@ -1257,11 +1292,14 @@ static int decrypt_bundle(const char *bundle_src, const char *bundle_dst,
     pid = 0;
 
     // 4) Rescue pass: target dyld may have aborted on a cross-OS bind-fail
-    //    before mapping all @rpath frameworks. mmap them ourselves and
-    //    decrypt via FairPlay page-fault on memcpy.
-    int rescued = rescue_unmapped_frameworks(bundle_src, bundle_dst, bs_len,
+    //    before mapping all @rpath frameworks; even on a clean dyld run,
+    //    nested frameworks, embedded toolchains, and Developer/ payloads
+    //    aren't loaded at launch. Recursively walk the bundle on disk,
+    //    mmap each encrypted Mach-O, and decrypt via FairPlay page-fault
+    //    on memcpy.
+    int rescued = rescue_unmapped_frameworks(bundle_src, bundle_dst,
         have_bundle_rt ? &bundle_rt : NULL,
-        (const char **)dumped_rel, n_dumped);
+        (const char **)dumped_rel, n_dumped, main_name);
     extra += rescued;
 
     for (int i = 0; i < n_dumped; i++) free(dumped_rel[i]);

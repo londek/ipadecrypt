@@ -21,6 +21,7 @@ var (
 	decryptNoVerify     bool
 	decryptKeepWatch    bool
 	decryptForce        bool
+	decryptPatchDevType bool
 
 	versionsLogResponses bool
 )
@@ -55,6 +56,7 @@ func main() {
 	decrypt.Flags().BoolVar(&decryptNoVerify, "no-verify", false, "skip the post-decrypt cryptid==0 check on every Mach-O")
 	decrypt.Flags().BoolVar(&decryptKeepWatch, "keep-watch", false, "keep the Watch/ directory")
 	decrypt.Flags().BoolVarP(&decryptForce, "force", "f", false, "force reinstall from provided .ipa source regardless of what's on the device")
+	decrypt.Flags().BoolVar(&decryptPatchDevType, "patch-device-type", false, "if the IPA's UIDeviceFamily excludes this device, append the device's family (iPadOS apps then run on iOS)")
 
 	versions := &cobra.Command{
 		Use:   "versions <bundle-id|app-store-id|app-store-url>",

@@ -16,14 +16,56 @@ import (
 )
 
 type PatchResult struct {
-	MinOSChanged  bool
-	PreviousMinOS string
-	WatchRemoved  int
+	MinOSChanged         bool
+	PreviousMinOS        string
+	WatchRemoved         int
+	DeviceFamilyExpanded bool
+	PreviousDeviceFamily []int
+	NewDeviceFamily      []int
 }
 
-// PatchForInstall rewrites main Info.plist MinimumOSVersion and (unless
-// keepWatch) drops Watch/ entries. Single zip pass.
-func PatchForInstall(src, dst, target string, keepWatch bool) (PatchResult, error) {
+// ErrDeviceFamilyMismatch is returned when an IPA's UIDeviceFamily list does
+// not include the target device's family and the caller has not opted into
+// patching. The caller can format a user-friendly message from the fields.
+type ErrDeviceFamilyMismatch struct {
+	Supported []int
+	Device    int
+}
+
+func (e *ErrDeviceFamilyMismatch) Error() string {
+	return fmt.Sprintf("app supports device family %v, device is %d (%s)",
+		e.Supported, e.Device, DeviceFamilyName(e.Device))
+}
+
+func DeviceFamilyName(f int) string {
+	switch f {
+	case 1:
+		return "iPhone"
+	case 2:
+		return "iPad"
+	case 3:
+		return "Apple TV"
+	case 4:
+		return "Apple Watch"
+	default:
+		return "unknown"
+	}
+}
+
+type plistPlan struct {
+	data                 []byte // rewritten bytes, or nil if unchanged
+	minOSChanged         bool
+	previousMinOS        string
+	deviceFamilyExpanded bool
+	previousFamily       []int
+	newFamily            []int
+}
+
+// PatchForInstall rewrites the main Info.plist (MinimumOSVersion plus, when
+// patchDeviceType is true, UIDeviceFamily) and—unless keepWatch—drops Watch/
+// entries. The Info.plist is pre-scanned so a device-family mismatch fails
+// early, without writing a partial output IPA.
+func PatchForInstall(src, dst, target string, deviceFamily int, patchDeviceType, keepWatch bool) (PatchResult, error) {
 	var res PatchResult
 
 	r, err := zip.OpenReader(src)
@@ -31,6 +73,28 @@ func PatchForInstall(src, dst, target string, keepWatch bool) (PatchResult, erro
 		return res, fmt.Errorf("open %s: %w", src, err)
 	}
 	defer r.Close()
+
+	var infoFile *zip.File
+	for _, f := range r.File {
+		if isMainAppInfoPlist(f.Name) {
+			infoFile = f
+			break
+		}
+	}
+
+	var plan plistPlan
+	if infoFile != nil {
+		plan, err = planInfoPlist(infoFile, target, deviceFamily, patchDeviceType)
+		if err != nil {
+			return res, err
+		}
+	}
+
+	res.MinOSChanged = plan.minOSChanged
+	res.PreviousMinOS = plan.previousMinOS
+	res.DeviceFamilyExpanded = plan.deviceFamilyExpanded
+	res.PreviousDeviceFamily = plan.previousFamily
+	res.NewDeviceFamily = plan.newFamily
 
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return res, fmt.Errorf("mkdir %s: %w", filepath.Dir(dst), err)
@@ -50,14 +114,9 @@ func PatchForInstall(src, dst, target string, keepWatch bool) (PatchResult, erro
 			continue
 		}
 
-		if isMainAppInfoPlist(f.Name) {
-			changed, prev, err := rewriteInfoPlist(f, target, w)
-			if err != nil {
+		if f == infoFile && plan.data != nil {
+			if err := writeBytes(f, w, plan.data); err != nil {
 				return res, fmt.Errorf("rewrite %s: %w", f.Name, err)
-			}
-			if changed {
-				res.MinOSChanged = true
-				res.PreviousMinOS = prev
 			}
 			continue
 		}
@@ -101,37 +160,98 @@ func copyEntry(f *zip.File, w *zip.Writer) error {
 	return err
 }
 
-func rewriteInfoPlist(f *zip.File, target string, w *zip.Writer) (bool, string, error) {
+func planInfoPlist(f *zip.File, target string, deviceFamily int, patchDeviceType bool) (plistPlan, error) {
+	var plan plistPlan
+
 	rc, err := f.Open()
 	if err != nil {
-		return false, "", err
+		return plan, err
 	}
 
 	data, err := io.ReadAll(rc)
 	rc.Close()
 	if err != nil {
-		return false, "", err
+		return plan, err
 	}
 
 	var m map[string]any
 	format, err := plist.Unmarshal(data, &m)
 	if err != nil {
-		// Not a parseable plist at this path; pass through unchanged.
-		return false, "", writeBytes(f, w, data)
+		// Not a parseable plist; pass through unchanged.
+		return plan, nil
 	}
+
+	dirty := false
 
 	current, _ := m["MinimumOSVersion"].(string)
-	if current == "" || cmpVer(current, target) <= 0 {
-		return false, "", writeBytes(f, w, data)
+	if current != "" && cmpVer(current, target) > 0 {
+		m["MinimumOSVersion"] = target
+		plan.minOSChanged = true
+		plan.previousMinOS = current
+		dirty = true
 	}
 
-	m["MinimumOSVersion"] = target
+	supported := readDeviceFamily(m["UIDeviceFamily"])
+	if deviceFamily > 0 && len(supported) > 0 && !containsInt(supported, deviceFamily) {
+		if !patchDeviceType {
+			return plan, &ErrDeviceFamilyMismatch{Supported: supported, Device: deviceFamily}
+		}
+
+		expanded := append(append([]int(nil), supported...), deviceFamily)
+		m["UIDeviceFamily"] = toAnySlice(expanded)
+		plan.deviceFamilyExpanded = true
+		plan.previousFamily = supported
+		plan.newFamily = expanded
+		dirty = true
+	}
+
+	if !dirty {
+		return plan, nil
+	}
+
 	newData, err := plist.Marshal(m, format)
 	if err != nil {
-		return false, "", fmt.Errorf("marshal plist: %w", err)
+		return plan, fmt.Errorf("marshal plist: %w", err)
 	}
 
-	return true, current, writeBytes(f, w, newData)
+	plan.data = newData
+	return plan, nil
+}
+
+func readDeviceFamily(v any) []int {
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]int, 0, len(arr))
+	for _, e := range arr {
+		switch n := e.(type) {
+		case uint64:
+			out = append(out, int(n))
+		case int64:
+			out = append(out, int(n))
+		case int:
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+func toAnySlice(in []int) []any {
+	out := make([]any, len(in))
+	for i, v := range in {
+		out[i] = uint64(v)
+	}
+	return out
+}
+
+func containsInt(haystack []int, needle int) bool {
+	for _, v := range haystack {
+		if v == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func writeBytes(f *zip.File, w *zip.Writer, data []byte) error {
