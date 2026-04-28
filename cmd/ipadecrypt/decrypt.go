@@ -932,13 +932,10 @@ func (p *helperProgress) HandleEvent(ev device.Event) helperUpdate {
 		return helperUpdate{note: fmt.Sprintf("chmod +x %s (was mode %s)", path.Base(ev.Attr("path")), ev.Attr("old_mode"))}
 
 	case "spawn_path":
-		if ev.Attr("path") == "ptrace" {
-			return helperUpdate{note: fmt.Sprintf("spawned %s via ptrace fallback", path.Base(ev.Attr("exec")))}
-		}
-		return helperUpdate{}
+		return helperUpdate{note: fmt.Sprintf("spawned %s via ptrace", path.Base(ev.Attr("exec")))}
 
 	case "spawn_path_fallback":
-		return helperUpdate{note: fmt.Sprintf("%s failed on %s, falling back", ev.Attr("from"), path.Base(ev.Attr("exec")))}
+		return helperUpdate{note: fmt.Sprintf("SBS failed on %s, falling back to ptrace", path.Base(ev.Attr("exec")))}
 
 	case "dyld":
 		if ev.Attr("phase") == "resuming" {

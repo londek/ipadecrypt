@@ -8,8 +8,8 @@
 //
 // CLI: ipadecrypt-helper-arm64 [-v] <bundle-id> <bundle-src> <out-ipa>
 //   bundle-id  - CFBundleIdentifier; "" skips the main-app pass (appex only).
-//                Used for SpringBoard SBS launch - only path that bypasses
-//                Dopamine unpatched AMFI for cross-OS main binaries.
+//                Used for SpringBoard SBS launch - launchd-lineage spawn that
+//                bypasses Sandbox kext's hook_execve gate on Dopamine.
 //   bundle-src - absolute path to the installed .app on disk.
 //   out-ipa    - absolute path to write the decrypted IPA to.
 
@@ -469,46 +469,6 @@ static int copy_tree(const char *src, const char *dst) {
     return copy_file(src, dst);
 }
 
-// ----- libjailbreak bridge (Dopamine trustcache) ----------------------
-
-static int (*g_trust_file_by_path)(const char *) = NULL;
-
-static void load_libjailbreak(void) {
-    static int tried = 0;
-    if (tried) return;
-    tried = 1;
-    void *h = dlopen("/var/jb/basebin/libjailbreak.dylib", RTLD_NOW);
-    if (!h) {
-        LOG("[helper] libjailbreak unavailable: %s\n", dlerror());
-        return;
-    }
-    g_trust_file_by_path = dlsym(h, "jbclient_trust_file_by_path");
-}
-
-// Walk bundle, trust-cache every Mach-O. Cross-OS frameworks need this to
-// survive AMFI library_validation when dyld maps them in the target.
-static void trust_walk(const char *root) {
-    load_libjailbreak();
-    if (!g_trust_file_by_path) return;
-    DIR *d = opendir(root);
-    if (!d) return;
-    struct dirent *e;
-    int n = 0;
-    while ((e = readdir(d))) {
-        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
-        char p[4096]; snprintf(p, sizeof(p), "%s/%s", root, e->d_name);
-        struct stat st;
-        if (lstat(p, &st) != 0) continue;
-        if (S_ISDIR(st.st_mode)) {
-            trust_walk(p);
-        } else if (S_ISREG(st.st_mode) && is_macho(p)) {
-            if (g_trust_file_by_path(p) == 0) n++;
-        }
-    }
-    closedir(d);
-    if (n > 0) LOG("[helper] trusted %d file(s) under %s\n", n, root);
-}
-
 // ----- SBS launch (via dlopen to avoid build-time framework link) -----
 
 // SDK Dockerfile drops System/Library/Frameworks. dlopen CoreFoundation +
@@ -603,29 +563,11 @@ static int sbs_launch(const char *bundle_id, const char *exec_path,
     return 0;
 }
 
-// ----- posix_spawn + PT_TRACE_ME fallback -----------------------------
+// ----- PT_TRACE_ME spawn -----------------------------------------------
 
-static int do_posix_spawn(const char *exec_path, pid_t *out_pid) {
-    posix_spawnattr_t attr;
-    posix_spawnattr_init(&attr);
-    posix_spawnattr_setflags(&attr, POSIX_SPAWN_START_SUSPENDED);
-    posix_spawn_file_actions_t fa;
-    posix_spawn_file_actions_init(&fa);
-    posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
-    posix_spawn_file_actions_addopen(&fa, 1, "/dev/null", O_WRONLY, 0);
-    posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
-    char *argv[] = { (char *)exec_path, NULL };
-    pid_t pid = 0;
-    int rc = posix_spawn(&pid, exec_path, &fa, &attr, argv, environ);
-    posix_spawn_file_actions_destroy(&fa);
-    posix_spawnattr_destroy(&attr);
-    if (rc == 0) *out_pid = pid;
-    return rc;
-}
-
-// Cross-OS fallback: fork, child PT_TRACE_ME + execve. P_TRACED is set in
-// proc BEFORE exec, so AMFI's post-exec check treats the child as
-// under-debug and skips the minOS SIGKILL.
+// fork, child PT_TRACE_ME + execve. P_LTRACED is set on the proc BEFORE
+// exec, so Sandbox's hook_execve takes the debugger-exemption branch and
+// doesn't apply the "only launchd may spawn untrusted binaries" gate.
 static int do_ptrace_spawn(const char *exec_path, pid_t *out_pid) {
     pid_t pid = fork();
     if (pid < 0) { ERR("fork: %s", strerror(errno)); return -1; }
@@ -648,7 +590,7 @@ static int do_ptrace_spawn(const char *exec_path, pid_t *out_pid) {
     return 0;
 }
 
-// Installed appex mains often ship mode 0644; posix_spawn/execve need +x.
+// Installed appex mains often ship mode 0644; execve needs +x.
 static void ensure_executable(const char *path) {
     struct stat st;
     if (stat(path, &st) != 0) return;
@@ -659,19 +601,14 @@ static void ensure_executable(const char *path) {
     }
 }
 
-// *out_ptrace=1 iff PT_TRACE_ME fallback taken (caller resumes via PT_CONTINUE).
+// *out_ptrace=1 iff PT_TRACE_ME path taken (caller resumes via PT_CONTINUE).
 //
 // Spawn-path order:
 //   bundle_id non-empty (main app):
-//     1. SBS suspended-launch  - cross-OS friendly on Dopamine unpatched AMFI
-//     2. posix_spawn START_SUSPENDED - same-OS fast path
-//     3. fork+PT_TRACE_ME+execve - last resort, AMFI-bypass via P_TRACED
+//     1. SBS suspended-launch  - launchd lineage, bypasses Sandbox hook_execve
+//     2. fork+PT_TRACE_ME+execve - P_LTRACED debugger-exemption branch
 //   bundle_id empty (appex):
-//     PT_TRACE_ME directly. posix_spawn is skipped here on purpose: on iOS
-//     15 palera1n posix_spawn of an appex main has been observed to succeed
-//     silently and then have the task die before mach_vm_read_overwrite,
-//     producing zero-pages dumps (issue #8). PT_TRACE_ME holds the child
-//     reliably across iOS 15/16 palera1n + iOS 16 Dopamine.
+//     PT_TRACE_ME directly. SBS rejects appex with kSBSError(7).
 static int spawn_suspended(const char *bundle_id, const char *exec_path,
                            pid_t *out_pid, task_t *out_task, int *out_ptrace) {
     *out_ptrace = 0;
@@ -680,22 +617,7 @@ static int spawn_suspended(const char *bundle_id, const char *exec_path,
         if (sbs_launch(bundle_id, exec_path, out_pid, out_task) == 0) {
             return 0;
         }
-        EVT("event=spawn_path_fallback from=sbs exec=\"%s\"", exec_path);
-
-        pid_t pid = 0;
-        task_t task = MACH_PORT_NULL;
-        int rc = do_posix_spawn(exec_path, &pid);
-        kern_return_t kr = KERN_FAILURE;
-        if (rc == 0) kr = task_for_pid(mach_task_self(), pid, &task);
-        if (rc == 0 && kr == KERN_SUCCESS) {
-            *out_pid = pid;
-            *out_task = task;
-            return 0;
-        }
-        if (rc == 0) kill(pid, SIGKILL);
-        LOG("[helper] posix_spawn=%d tfp=%d, trying PT_TRACE_ME\n", rc, kr);
-        EVT("event=spawn_path_fallback from=posix_spawn exec=\"%s\" posix_rc=%d tfp=%d",
-            exec_path, rc, kr);
+        EVT("event=spawn_path_fallback exec=\"%s\"", exec_path);
     }
 
     pid_t pid = 0;
@@ -948,9 +870,9 @@ static void run_and_suspend(task_t task, pid_t pid, int via_ptrace,
             waited += 200;
         }
     } else {
-        // SBS / posix_spawn leave the task with potentially multiple
-        // suspensions (task itself + runningboardd assertion). Drain until
-        // suspend count is 0 so threads actually run.
+        // SBS leaves the task with potentially multiple suspensions
+        // (task itself + runningboardd assertion). Drain until suspend
+        // count is 0 so threads actually run.
         while (task_resume(task) == KERN_SUCCESS) { /* loop */ }
         if (exc_port != MACH_PORT_NULL) {
             struct { mach_msg_header_t hdr; char body[2048]; } msg;
@@ -1150,7 +1072,6 @@ static int decrypt_bundle(const char *bundle_src, const char *bundle_dst,
     char main_src[4096], main_dst[4096];
     snprintf(main_src, sizeof(main_src), "%s/%s", bundle_src, main_name);
     snprintf(main_dst, sizeof(main_dst), "%s/%s", bundle_dst, main_name);
-    trust_walk(bundle_src);
 
     pid_t pid = 0;
     task_t task = MACH_PORT_NULL;
