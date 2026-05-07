@@ -55,7 +55,7 @@ release:
   github:
     owner: londek
     name: ipadecrypt
-  draft: false
+  draft: true
   prerelease: auto
   extra_files:
     - glob: helper/dist/ipadecrypt-helper-arm64
