@@ -290,7 +290,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 				live.OK("helper ready")
 
-				runDecryptOnBundle(dev, helperPath, target.bundleId, installedPath, version, "", "")
+				runDecryptOnBundle(dev, helperPath, target.bundleId, installedPath, version, "", "", "")
 
 				return
 			}
@@ -492,7 +492,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		live.OK("already installed → %s", install.bundlePath)
 	}
 
-	runDecryptOnBundle(dev, plan.helperPath, appBundleID, install.bundlePath, appVersion, plan.stagingRemote, encPath)
+	runDecryptOnBundle(dev, plan.helperPath, appBundleID, install.bundlePath, appVersion, plan.stagingRemote, encPath, patch.previousMinOS)
 }
 
 // runDecryptOnBundle runs helper → pull → verify → cleanup on an
@@ -500,7 +500,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 // srcIPAPath is the source IPA on the host when one exists (App Store
 // download / cache hit / local --ipa); empty for the use-installed path
 // where the source lives on-device only. Used by --extra-verify.
-func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, version, stagingRemote, srcIPAPath string) {
+func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, version, stagingRemote, srcIPAPath, restoreMinOS string) {
 	outRemote := remoteOutputPath(bundleID, version)
 
 	if err := dev.Mkdir(path.Dir(outRemote)); err != nil {
@@ -664,6 +664,17 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 			}
 
 			live.OK("%d Mach-O(s) byte-match source%s", res.Compared, suffix)
+		}
+	}
+
+	if restoreMinOS != "" {
+		live = tui.NewLive()
+		live.Spin("restoring MinimumOSVersion to " + restoreMinOS)
+
+		if err := pipeline.RestoreMinimumOSVersion(outLocal, restoreMinOS); err != nil {
+			live.Fail("restore MinimumOSVersion failed: %v", err)
+		} else {
+			live.OK("restored MinimumOSVersion to %s", restoreMinOS)
 		}
 	}
 

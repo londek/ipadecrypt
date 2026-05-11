@@ -459,3 +459,82 @@ func cmpVer(a, b string) int {
 
 	return 0
 }
+
+// RestoreMinimumOSVersion rewrites the main Info.plist (MinimumOSVersion) to the original value in the given IPA file.
+func RestoreMinimumOSVersion(ipaPath, originalMinOS string) error {
+	tmpPath := ipaPath + ".tmp"
+
+	r, err := zip.OpenReader(ipaPath)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", ipaPath, err)
+	}
+	defer r.Close()
+
+	var infoFile *zip.File
+	for _, f := range r.File {
+		if isMainAppInfoPlist(f.Name) {
+			infoFile = f
+			break
+		}
+	}
+
+	var data []byte
+	if infoFile != nil {
+		rc, err := infoFile.Open()
+		if err != nil {
+			return err
+		}
+		originalData, err := io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			return err
+		}
+
+		var m map[string]any
+		format, err := plist.Unmarshal(originalData, &m)
+		if err == nil {
+			m["MinimumOSVersion"] = originalMinOS
+			data, err = plist.Marshal(m, format)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	out, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("open dst %s: %w", tmpPath, err)
+	}
+
+	w := zip.NewWriter(out)
+
+	for _, f := range r.File {
+		if f == infoFile && data != nil {
+			if err := writeBytes(f, w, data); err != nil {
+				out.Close()
+				os.Remove(tmpPath)
+				return fmt.Errorf("rewrite %s: %w", f.Name, err)
+			}
+			continue
+		}
+
+		if err := copyEntry(f, w); err != nil {
+			out.Close()
+			os.Remove(tmpPath)
+			return fmt.Errorf("copy %s: %w", f.Name, err)
+		}
+	}
+
+	if err := w.Close(); err != nil {
+		out.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("close zip: %w", err)
+	}
+
+	if err := out.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+
+	return os.Rename(tmpPath, ipaPath)
+}
