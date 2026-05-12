@@ -25,6 +25,7 @@ var (
 	decryptUseInstalled bool
 	decryptPatchDevType bool
 	decryptVerbose      bool
+	decryptSkipAppex    bool
 
 	versionsLogResponses bool
 )
@@ -61,6 +62,7 @@ func main() {
 	decrypt.Flags().BoolVarP(&decryptFromAppStore, "from-appstore", "f", false, "fetch from App Store and reinstall, ignoring what's installed on the device")
 	decrypt.Flags().BoolVar(&decryptUseInstalled, "use-installed", false, "decrypt the installed build directly; skip the App Store path even if a newer version exists")
 	decrypt.Flags().BoolVar(&decryptPatchDevType, "patch-device-type", false, "if the IPA's UIDeviceFamily excludes this device, append the device's family (iPadOS apps then run on iOS)")
+	decrypt.Flags().BoolVar(&decryptSkipAppex, "skip-appex", false, "skip app extension (.appex) launch/decrypt attempts")
 	decrypt.Flags().BoolVarP(&decryptVerbose, "verbose", "v", false, "stream the on-device helper's LOG/ERR lines to stderr (useful for debugging decryption failures)")
 
 	versions := &cobra.Command{
