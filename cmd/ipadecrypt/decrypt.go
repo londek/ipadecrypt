@@ -334,7 +334,11 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 			return
 		}
 
-		tui.OK("signed in as %s (%s storefront)", cfg.Apple.Account.Email, appStoreCountry)
+		displayEmail := cfg.Apple.Account.Email
+		if idx := strings.Index(displayEmail, "@"); idx > 5 {
+			displayEmail = displayEmail[:5] + "..." + displayEmail[idx:]
+		}
+		tui.OK("signed in as %s (%s storefront)", displayEmail, appStoreCountry)
 
 		live = tui.NewLive()
 
