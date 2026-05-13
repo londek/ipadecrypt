@@ -460,10 +460,9 @@ func cmpVer(a, b string) int {
 	return 0
 }
 
-// RestoreMinimumOSVersion rewrites the main Info.plist (MinimumOSVersion) to the original value in the given IPA file.
-func RestoreMinimumOSVersion(ipaPath, originalMinOS string) error {
+// RestoreOriginalPlistValues rewrites the main Info.plist (MinimumOSVersion and UIDeviceFamily) to their original values in the given IPA file.
+func RestoreOriginalPlistValues(ipaPath, originalMinOS string, originalDeviceFamily []int) error {
 	tmpPath := ipaPath + ".tmp"
-
 	r, err := zip.OpenReader(ipaPath)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", ipaPath, err)
@@ -493,10 +492,20 @@ func RestoreMinimumOSVersion(ipaPath, originalMinOS string) error {
 		var m map[string]any
 		format, err := plist.Unmarshal(originalData, &m)
 		if err == nil {
-			m["MinimumOSVersion"] = originalMinOS
-			data, err = plist.Marshal(m, format)
-			if err != nil {
-				return err
+			dirty := false
+			if originalMinOS != "" {
+				m["MinimumOSVersion"] = originalMinOS
+				dirty = true
+			}
+			if len(originalDeviceFamily) > 0 {
+				m["UIDeviceFamily"] = toAnySlice(originalDeviceFamily)
+				dirty = true
+			}
+			if dirty {
+				data, err = plist.Marshal(m, format)
+				if err != nil {
+					return err
+				}
 			}
 		}
 	}

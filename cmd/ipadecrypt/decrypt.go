@@ -290,7 +290,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 				live.OK("helper ready")
 
-				runDecryptOnBundle(dev, helperPath, target.bundleId, installedPath, version, "", "", "")
+				runDecryptOnBundle(dev, helperPath, target.bundleId, installedPath, version, "", "", "", nil)
 
 				return
 			}
@@ -492,7 +492,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		live.OK("already installed → %s", install.bundlePath)
 	}
 
-	runDecryptOnBundle(dev, plan.helperPath, appBundleID, install.bundlePath, appVersion, plan.stagingRemote, encPath, patch.previousMinOS)
+	runDecryptOnBundle(dev, plan.helperPath, appBundleID, install.bundlePath, appVersion, plan.stagingRemote, encPath, patch.previousMinOS, patch.previousDeviceFamily)
 }
 
 // runDecryptOnBundle runs helper → pull → verify → cleanup on an
@@ -500,7 +500,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 // srcIPAPath is the source IPA on the host when one exists (App Store
 // download / cache hit / local --ipa); empty for the use-installed path
 // where the source lives on-device only. Used by --extra-verify.
-func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, version, stagingRemote, srcIPAPath, restoreMinOS string) {
+func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, version, stagingRemote, srcIPAPath, restoreMinOS string, restoreDeviceFamily []int) {
 	outRemote := remoteOutputPath(bundleID, version)
 
 	if err := dev.Mkdir(path.Dir(outRemote)); err != nil {
@@ -667,17 +667,23 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 		}
 	}
 
-	if restoreMinOS != "" {
+	if restoreMinOS != "" || len(restoreDeviceFamily) > 0 {
 		live = tui.NewLive()
-		live.Spin("restoring MinimumOSVersion to " + restoreMinOS)
+		live.Spin("restoring patched Info.plist values")
 
-		if err := pipeline.RestoreMinimumOSVersion(outLocal, restoreMinOS); err != nil {
-			live.Fail("restore MinimumOSVersion failed: %v", err)
+		if err := pipeline.RestoreOriginalPlistValues(outLocal, restoreMinOS, restoreDeviceFamily); err != nil {
+			live.Fail("restore original Info.plist values failed: %v", err)
 		} else {
-			live.OK("restored MinimumOSVersion to %s", restoreMinOS)
+			msg := []string{}
+			if restoreMinOS != "" {
+				msg = append(msg, fmt.Sprintf("MinimumOSVersion to %s", restoreMinOS))
+			}
+			if len(restoreDeviceFamily) > 0 {
+				msg = append(msg, fmt.Sprintf("UIDeviceFamily to %v", restoreDeviceFamily))
+			}
+			live.OK("restored %s", strings.Join(msg, ", "))
 		}
 	}
-
 	cleanupDecrypt(dev, decryptNoCleanup, stagingRemote, outRemote)
 }
 
