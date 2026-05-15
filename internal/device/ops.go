@@ -241,15 +241,18 @@ func (c *Client) InstalledVersion(bundlePath string) (string, error) {
 	return "", errors.New("installed version not found")
 }
 
-// FindInstalledByBundleID returns the first installed .app whose Info.plist
-// contains bundleID
+// FindInstalledByBundleID returns the installed .app whose Info.plist
+// CFBundleIdentifier exactly matches bundleID. Substring grep is used as a
+// cheap prefilter; each candidate is then parsed to confirm the exact
+// identifier (binary plists may contain the bundle ID as a non-identifier
+// substring, e.g. URL handler/query schemes).
 func (c *Client) FindInstalledByBundleID(bundleID string) (string, error) {
 	if strings.ContainsAny(bundleID, "'\"\\$`\n") {
 		return "", fmt.Errorf("unsupported characters in bundle-id %q", bundleID)
 	}
 
 	cmd := fmt.Sprintf(
-		"sh -c 'grep -laF \"%s\" /var/containers/Bundle/Application/*/*.app/Info.plist 2>/dev/null | head -n1'",
+		"sh -c 'grep -laF \"%s\" /var/containers/Bundle/Application/*/*.app/Info.plist 2>/dev/null'",
 		bundleID)
 
 	out, errOut, code, err := c.RunSudo(cmd)
@@ -261,33 +264,44 @@ func (c *Client) FindInstalledByBundleID(bundleID string) (string, error) {
 		return "", fmt.Errorf("find-by-bundle-id exit %d: %s", code, strings.TrimSpace(errOut))
 	}
 
-	hit := strings.TrimSpace(out)
-	if hit == "" {
-		return "", nil
+	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
+		infoPath := strings.TrimSpace(line)
+		if infoPath == "" {
+			continue
+		}
+
+		bundlePath := strings.TrimSuffix(infoPath, "/Info.plist")
+
+		got, err := c.bundleIdentifierAt(infoPath)
+		if err != nil {
+			continue
+		}
+
+		if got == bundleID {
+			return bundlePath, nil
+		}
 	}
 
-	return strings.TrimSuffix(hit, "/Info.plist"), nil
+	return "", nil
 }
 
-// FindInstalled locates an installed app bundle directory by its .app name.
-// Installed apps live under /var/containers/Bundle/Application/<uuid>/X.app
-// on rootful and rootless setups alike. Requires sudo because /var/containers
-// is readable only by _installd + root.
-func (c *Client) FindInstalled(appDirName string) (string, error) {
-	cmd := fmt.Sprintf(
-		"ls -d /var/containers/Bundle/Application/*/%q 2>/dev/null | head -1",
-		appDirName)
-
-	out, errOut, code, err := c.RunSudo(cmd)
+func (c *Client) bundleIdentifierAt(infoPlistPath string) (string, error) {
+	out, errOut, code, err := c.RunSudo(fmt.Sprintf("cat %q", infoPlistPath))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("read Info.plist: %w", err)
 	}
 
-	if code != 0 && code != 1 {
-		return "", fmt.Errorf("find installed exit %d: stderr=%q", code, errOut)
+	if code != 0 {
+		return "", fmt.Errorf("read Info.plist exit %d: %s", code, strings.TrimSpace(errOut))
 	}
 
-	return strings.TrimSpace(out), nil
+	var info map[string]any
+	if _, err := plist.Unmarshal([]byte(out), &info); err != nil {
+		return "", fmt.Errorf("parse Info.plist: %w", err)
+	}
+
+	id, _ := info["CFBundleIdentifier"].(string)
+	return id, nil
 }
 
 // VerifyHelper is a best-effort sanity: invoke the helper with no args; it

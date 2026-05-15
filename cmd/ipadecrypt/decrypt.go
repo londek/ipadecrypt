@@ -50,6 +50,7 @@ type patchResult struct {
 type installPlan struct {
 	helperPath    string
 	appinstPath   string
+	bundleID      string
 	bundlePath    string
 	stagingRemote string
 }
@@ -444,7 +445,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 	live = tui.NewLive()
 	live.Spin("preparing install plan")
 
-	plan, err := buildInstallPlan(dev, patch.uploadPath)
+	plan, err := buildInstallPlan(dev, patch.uploadPath, appBundleID)
 	if err != nil {
 		switch {
 		case errors.Is(err, errAppinstNotFound):
@@ -795,12 +796,7 @@ func patchSourceForDevice(encPath, iosVersion string, deviceFamily int, patchDev
 	}, nil
 }
 
-func buildInstallPlan(dev *device.Client, uploadPath string) (installPlan, error) {
-	appDirName, err := pipeline.AppDirName(uploadPath)
-	if err != nil {
-		return installPlan{}, fmt.Errorf("read IPA: %w", err)
-	}
-
+func buildInstallPlan(dev *device.Client, uploadPath, bundleID string) (installPlan, error) {
 	helperPath, err := dev.EnsureHelper()
 	if err != nil {
 		return installPlan{}, fmt.Errorf("helper upload: %w", err)
@@ -815,7 +811,7 @@ func buildInstallPlan(dev *device.Client, uploadPath string) (installPlan, error
 		return installPlan{}, errAppinstNotFound
 	}
 
-	bundlePath, err := dev.FindInstalled(appDirName)
+	bundlePath, err := dev.FindInstalledByBundleID(bundleID)
 	if err != nil {
 		return installPlan{}, fmt.Errorf("scan installed: %w", err)
 	}
@@ -823,6 +819,7 @@ func buildInstallPlan(dev *device.Client, uploadPath string) (installPlan, error
 	return installPlan{
 		helperPath:    helperPath,
 		appinstPath:   appinstPath,
+		bundleID:      bundleID,
 		bundlePath:    bundlePath,
 		stagingRemote: path.Join(device.RemoteRoot, "staging", filepath.Base(uploadPath)),
 	}, nil
@@ -901,14 +898,9 @@ func installUploadedBundle(dev *device.Client, plan installPlan, uploadPath stri
 		return installResult{}, fmt.Errorf("install: %w", err)
 	}
 
-	appDirName, err := pipeline.AppDirName(uploadPath)
-	if err != nil {
-		return installResult{}, fmt.Errorf("read IPA: %w", err)
-	}
-
 	notify(installRescan)
 
-	bundlePath, err := dev.FindInstalled(appDirName)
+	bundlePath, err := dev.FindInstalledByBundleID(plan.bundleID)
 	if err != nil {
 		return installResult{}, fmt.Errorf("post-install scan: %w", err)
 	}
@@ -1133,6 +1125,13 @@ func (p *helperProgress) HandleEvent(ev device.Event) helperUpdate {
 			return helperUpdate{spin: fmt.Sprintf("running %s", path.Base(ev.Attr("src")))}
 		case "trapped":
 			msg := dyldTrappedMessage(ev)
+			if pc := ev.Attr("pc"); pc != "" && pc != "0x0" {
+				if msg != "" {
+					msg += fmt.Sprintf(" (pc=%s)", pc)
+				} else {
+					msg = fmt.Sprintf("dyld trapped at pc=%s", pc)
+				}
+			}
 			if msg == "" {
 				return helperUpdate{}
 			}
@@ -1141,6 +1140,10 @@ func (p *helperProgress) HandleEvent(ev device.Event) helperUpdate {
 		}
 
 	case "patch":
+		if ev.Attr("phase") == "scan_done" {
+			return helperUpdate{note: fmt.Sprintf("dyld patches: kills=%s forces=%s skips=%s",
+				ev.Attr("kills"), ev.Attr("forces"), ev.Attr("skips"))}
+		}
 		return helperUpdate{}
 
 	case "inject":
@@ -1155,6 +1158,14 @@ func (p *helperProgress) HandleEvent(ev device.Event) helperUpdate {
 			return helperUpdate{note: fmt.Sprintf("could not decrypt %s in target", path.Base(ev.Attr("name")))}
 		case "tramp_alloc_fail", "tramp_write_fail":
 			return helperUpdate{note: "couldn't set up decrypt in target"}
+		case "mremap_fail":
+			return helperUpdate{note: fmt.Sprintf("mremap_encrypted failed in target (rc=%s)", ev.Attr("rc"))}
+		case "prefault_fail":
+			return helperUpdate{note: "prefault loop didn't return (target thread stuck)"}
+		case "target_call_timeout":
+			return helperUpdate{note: fmt.Sprintf("target syscall timed out (pc=%s lr=%s)", ev.Attr("pc"), ev.Attr("lr"))}
+		case "target_call_crashed":
+			return helperUpdate{note: fmt.Sprintf("target syscall crashed (exc=%s code1=%s)", ev.Attr("exc"), ev.Attr("code1"))}
 		}
 
 		return helperUpdate{}

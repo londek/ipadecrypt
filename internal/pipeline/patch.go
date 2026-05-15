@@ -398,23 +398,6 @@ func AppInfo(ipaPath string) (bundleID, version string, err error) {
 	return "", "", fmt.Errorf("no Payload/*.app/Info.plist in %s", ipaPath)
 }
 
-func AppDirName(ipaPath string) (string, error) {
-	r, err := zip.OpenReader(ipaPath)
-	if err != nil {
-		return "", fmt.Errorf("open %s: %w", ipaPath, err)
-	}
-	defer r.Close()
-
-	for _, f := range r.File {
-		parts := strings.Split(f.Name, "/")
-		if len(parts) >= 2 && parts[0] == "Payload" && strings.HasSuffix(parts[1], ".app") {
-			return parts[1], nil
-		}
-	}
-
-	return "", fmt.Errorf("no Payload/*.app/ directory in %s", ipaPath)
-}
-
 func isWatchPath(name string) bool {
 	parts := strings.Split(name, "/")
 	if len(parts) < 3 {
