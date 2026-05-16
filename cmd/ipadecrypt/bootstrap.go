@@ -354,8 +354,6 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 
 	if err := dev.VerifyHelper(helperPath); err != nil {
 		live.Fail("verify failed: %v", err)
-		tui.Info("the device's code-signing layer rejected the helper's entitlements")
-
 		return
 	}
 
