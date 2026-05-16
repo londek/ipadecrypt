@@ -2,3 +2,4 @@
 .claude
 dist/
 .grepai/
+.DS_Store

@@ -1,8 +1,10 @@
 package device
 
 import (
+	"archive/tar"
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
@@ -11,6 +13,7 @@ import (
 	"io"
 	"path"
 	"strings"
+	"time"
 
 	"howett.net/plist"
 )
@@ -113,7 +116,22 @@ func (c *Client) LocateBinary(name string) (string, error) {
 		return "", err
 	}
 
-	return strings.TrimSpace(out), nil
+	if p := strings.TrimSpace(out); p != "" {
+		return p, nil
+	}
+
+	for _, candidate := range []string{
+		path.Join("/var/jb/usr/bin", name),
+		path.Join("/var/jb/usr/local/bin", name),
+		path.Join("/usr/bin", name),
+		path.Join("/usr/local/bin", name),
+	} {
+		if c.Exists(candidate) {
+			return candidate, nil
+		}
+	}
+
+	return "", nil
 }
 
 func (c *Client) LocateAppSync() (string, error) {
@@ -156,8 +174,16 @@ func (c *Client) Install(appinstPath, ipaRemote string) error {
 
 func (c *Client) EnsureHelper() (string, error) {
 	sum := sha256.Sum256(helperArm64)
-	remote := path.Join(RemoteRoot, "helpers",
-		fmt.Sprintf("ipadecrypt-helper-arm64-%s.bin", hex.EncodeToString(sum[:])[:12]))
+	name := fmt.Sprintf("ipadecrypt-helper-arm64-%s.bin", hex.EncodeToString(sum[:])[:12])
+	remote := path.Join(c.helperInstallRoot(), name)
+
+	if strings.HasPrefix(remote, "/var/jb/") {
+		if err := c.installRootlessHelperPackage(remote, name); err != nil {
+			return "", err
+		}
+
+		return remote, nil
+	}
 
 	if c.Exists(remote) {
 		return remote, nil
@@ -168,6 +194,128 @@ func (c *Client) EnsureHelper() (string, error) {
 	}
 
 	return remote, nil
+}
+
+func (c *Client) installRootlessHelperPackage(remote, name string) error {
+	deb, err := buildHelperDeb(name, remote, helperArm64)
+	if err != nil {
+		return err
+	}
+
+	debRemote := path.Join(RemoteRoot, "helpers", "."+name+".deb")
+	if err := c.Upload(bytes.NewReader(deb), debRemote, 0o644); err != nil {
+		return fmt.Errorf("upload helper package: %w", err)
+	}
+
+	_, errOut, code, err := c.RunSudo(fmt.Sprintf("dpkg -i %q", debRemote))
+	c.Remove(debRemote)
+	if code != 0 {
+		return fmt.Errorf("install helper package exit %d: %s", code, strings.TrimSpace(errOut))
+	}
+	if err != nil {
+		return fmt.Errorf("install helper package: %w", err)
+	}
+
+	return nil
+}
+
+func buildHelperDeb(name, remote string, payload []byte) ([]byte, error) {
+	packageName := "com.londek.ipadecrypt.helper." + strings.TrimSuffix(strings.TrimPrefix(name, "ipadecrypt-helper-arm64-"), ".bin")
+	control := fmt.Sprintf("Package: %s\nName: ipadecrypt helper\nVersion: 1.0\nArchitecture: iphoneos-arm64\nMaintainer: ipadecrypt\nDescription: ipadecrypt on-device decrypt helper\n", packageName)
+
+	controlTar, err := gzipTar(map[string]tarEntry{
+		"./control": {body: []byte(control), mode: 0o644},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build helper package control: %w", err)
+	}
+
+	dataEntries := map[string]tarEntry{}
+	dir := path.Dir(strings.TrimPrefix(remote, "/"))
+	for dir != "." && dir != "/" && dir != "" {
+		dataEntries["./"+dir] = tarEntry{mode: 0o755, dir: true}
+		dir = path.Dir(dir)
+	}
+	dataEntries["./"+strings.TrimPrefix(remote, "/")] = tarEntry{body: payload, mode: 0o755}
+
+	dataTar, err := gzipTar(dataEntries)
+	if err != nil {
+		return nil, fmt.Errorf("build helper package data: %w", err)
+	}
+
+	var deb bytes.Buffer
+	deb.WriteString("!<arch>\n")
+	writeArMember(&deb, "debian-binary", []byte("2.0\n"), 0o644)
+	writeArMember(&deb, "control.tar.gz", controlTar, 0o644)
+	writeArMember(&deb, "data.tar.gz", dataTar, 0o644)
+
+	return deb.Bytes(), nil
+}
+
+type tarEntry struct {
+	body []byte
+	mode int64
+	dir  bool
+}
+
+func gzipTar(entries map[string]tarEntry) ([]byte, error) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+
+	for name, entry := range entries {
+		typ := byte(tar.TypeReg)
+		size := int64(len(entry.body))
+		if entry.dir {
+			typ = tar.TypeDir
+			size = 0
+		}
+		if err := tw.WriteHeader(&tar.Header{
+			Name:     name,
+			Mode:     entry.mode,
+			Size:     size,
+			Typeflag: typ,
+			ModTime:  time.Unix(0, 0),
+			Uid:      0,
+			Gid:      0,
+			Uname:    "root",
+			Gname:    "wheel",
+		}); err != nil {
+			return nil, err
+		}
+		if !entry.dir {
+			if _, err := tw.Write(entry.body); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err := tw.Close(); err != nil {
+		return nil, err
+	}
+	if err := gz.Close(); err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
+}
+
+func writeArMember(w *bytes.Buffer, name string, body []byte, mode int64) {
+	if len(name) > 15 {
+		name = name[:15]
+	}
+	fmt.Fprintf(w, "%-16s%-12d%-6d%-6d%-8o%-10d`\n", name, 0, 0, 0, mode, len(body))
+	w.Write(body)
+	if len(body)%2 != 0 {
+		w.WriteByte('\n')
+	}
+}
+
+func (c *Client) helperInstallRoot() string {
+	if c.Exists("/var/jb") {
+		return "/var/jb/usr/local/libexec/ipadecrypt/helpers"
+	}
+
+	return path.Join(RemoteRoot, "helpers")
 }
 
 // HashFile computes the sha256 of a path on-device. Installed bundles under
@@ -308,18 +456,34 @@ func (c *Client) bundleIdentifierAt(infoPlistPath string) (string, error) {
 // should exit 2 with a usage string we can recognize. Catches common issues
 // (binary not executable, sudo denied, missing codesign).
 func (c *Client) VerifyHelper(helperPath string) error {
-	cmd := fmt.Sprintf("%s 2>&1 | head -1", helperPath)
+	cmd := fmt.Sprintf("sh -c %q", helperPath+" 2>&1")
 
-	out, _, _, err := c.RunSudo(cmd)
+	out, errOut, code, err := c.RunSudo(cmd)
 	if err != nil {
 		return fmt.Errorf("verify helper: %w", err)
 	}
 
 	if !strings.Contains(out, "usage:") {
-		return fmt.Errorf("helper didn't respond with usage (got %q)", strings.TrimSpace(out))
+		got := strings.TrimSpace(out)
+		if got == "" {
+			got = strings.TrimSpace(errOut)
+		}
+		if got == "" {
+			got = fmt.Sprintf("exit %d with no output", code)
+		}
+
+		return fmt.Errorf("helper didn't respond with usage (got %q)", firstLine(got))
 	}
 
 	return nil
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+
+	return s
 }
 
 type EventHandler func(Event)
@@ -327,8 +491,12 @@ type EventHandler func(Event)
 // RunHelper spawns the on-device helper for a bundle. bundleID goes to the
 // SpringBoard SBS SPI (only accepted for the main app; empty string skips
 // the main-app pass and just decrypts PlugIns/*.appex + Extensions/*.appex).
-func (c *Client) RunHelper(helperPath, bundleID, bundlePath, outIPA string, onEvent EventHandler, humanFallback io.Writer) (string, string, int, error) {
-	cmd := fmt.Sprintf("%s -v %q %q %q", helperPath, bundleID, bundlePath, outIPA)
+func (c *Client) RunHelper(helperPath, bundleID, bundlePath, outIPA string, skipAppex bool, onEvent EventHandler, humanFallback io.Writer) (string, string, int, error) {
+	flags := "-v"
+	if skipAppex {
+		flags += " --skip-appex"
+	}
+	cmd := fmt.Sprintf("%s %s %q %q %q", helperPath, flags, bundleID, bundlePath, outIPA)
 	// @evt lines on stdout → splitter; LOG/ERR on stderr → humanFallback.
 	splitter := newEventSplitter(onEvent, humanFallback)
 	defer splitter.Close()

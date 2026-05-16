@@ -7,7 +7,7 @@
 // hijack. Patches cryptid=0, packs IPA. Walks PlugIns/*.appex +
 // Extensions/*.appex separately.
 //
-// CLI: ipadecrypt-helper-arm64 [-v] <bundle-id> <bundle-src> <out-ipa>
+// CLI: ipadecrypt-helper-arm64 [-v] [--skip-appex] <bundle-id> <bundle-src> <out-ipa>
 //   bundle-id  - CFBundleIdentifier; "" skips the main-app pass (appex only).
 //                Used for SpringBoard SBS launch - launchd-lineage spawn that
 //                bypasses Sandbox kext's hook_execve gate on Dopamine.
@@ -122,6 +122,7 @@ extern char **environ;
 // ----- logging ---------------------------------------------------------
 
 static int g_verbose = 0;
+static int g_skip_appex = 0;
 
 #define LOG(...) do { if (g_verbose) fprintf(stderr, __VA_ARGS__); } while (0)
 #define ERR(fmt, ...) fprintf(stderr, "[helper] ERROR: " fmt "\n", ##__VA_ARGS__)
@@ -1975,7 +1976,6 @@ static int decrypt_bundle(const char *bundle_src, const char *bundle_dst,
         EVT("event=spawn_failed src=\"%s\"", bundle_src);
         return 0; // non-fatal; continue with rest of the IPA
     }
-
     // 1) Dump the main exec. Fingerprint runtime arch from the loaded
     //    mach_header so slice selection matches what dyld actually mapped.
     //    FairPlay decrypts on page fault during mach_vm_read_overwrite,
@@ -2231,11 +2231,12 @@ int main(int argc, char **argv) {
     int pi = 1;
     while (pi < argc && argv[pi][0] == '-') {
         if (strcmp(argv[pi], "-v") == 0) { g_verbose = 1; pi++; continue; }
+        if (strcmp(argv[pi], "--skip-appex") == 0) { g_skip_appex = 1; pi++; continue; }
         break;
     }
     if (argc - pi != 3) {
         fprintf(stderr,
-            "usage: %s [-v] <bundle-id> <bundle-src> <out-ipa>\n"
+            "usage: %s [-v] [--skip-appex] <bundle-id> <bundle-src> <out-ipa>\n"
             "  bundle-id  CFBundleIdentifier (for SBS), or \"\" to skip main app\n"
             "  bundle-src absolute path to the installed .app on disk\n"
             "  out-ipa    where to write the decrypted IPA\n",
@@ -2273,7 +2274,11 @@ int main(int argc, char **argv) {
     if (bundle_id && bundle_id[0]) {
         decrypt_bundle(bundle_src, bundle_dst, bundle_id);
     }
-    decrypt_appexes(bundle_src, bundle_dst);
+    if (g_skip_appex) {
+        EVT("event=appex phase=skipped");
+    } else {
+        decrypt_appexes(bundle_src, bundle_dst);
+    }
 
     LOG("[helper] zipping → %s\n", out_ipa);
     EVT("event=pack phase=start ipa=\"%s\"", out_ipa);

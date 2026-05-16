@@ -2,12 +2,21 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <key>get-task-allow</key>
+    <true/>
+
     <!-- task_for_pid on the target -->
     <key>task_for_pid-allow</key>
     <true/>
 
     <!-- cross-task thread_set_state -->
     <key>com.apple.private.cs.debugger</key>
+    <true/>
+    <key>com.apple.private.thread-set-state</key>
+    <true/>
+    <key>com.apple.system-task-ports</key>
+    <true/>
+    <key>com.apple.system-task-ports.control</key>
     <true/>
 
     <!-- platform/sandbox/container slack. platform-application is required:
@@ -16,6 +25,8 @@
          read installed bundles + write to /tmp. -->
     <key>platform-application</key>
     <true/>
+    <key>com.apple.private.security.container-required</key>
+    <false/>
     <key>com.apple.private.security.no-sandbox</key>
     <true/>
     <key>com.apple.private.security.no-container</key>

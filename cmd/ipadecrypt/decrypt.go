@@ -543,7 +543,7 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 		helperStderr = stderrNoter
 	}
 
-	_, _, code, err := dev.RunHelper(helperPath, bundleID, bundlePath, outRemote, onEvent, helperStderr)
+	_, _, code, err := dev.RunHelper(helperPath, bundleID, bundlePath, outRemote, decryptSkipAppex, onEvent, helperStderr)
 
 	if stderrNoter != nil {
 		stderrNoter.Flush()
@@ -618,6 +618,19 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 			return
 		}
 
+		ignoredEncrypted := 0
+		if decryptSkipAppex && len(res.Encrypted) > 0 {
+			encrypted := res.Encrypted[:0]
+			for _, n := range res.Encrypted {
+				if isAppexPath(n) {
+					ignoredEncrypted++
+					continue
+				}
+				encrypted = append(encrypted, n)
+			}
+			res.Encrypted = encrypted
+		}
+
 		if len(res.Encrypted) > 0 {
 			live.Fail("%d binary(ies) still have cryptid != 0", len(res.Encrypted))
 
@@ -631,6 +644,9 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 		suffix := ""
 		if len(res.Skipped) > 0 {
 			suffix = fmt.Sprintf(" (%d skipped)", len(res.Skipped))
+		}
+		if ignoredEncrypted > 0 {
+			suffix += fmt.Sprintf(" (%d encrypted appex ignored)", ignoredEncrypted)
 		}
 
 		live.OK("%d Mach-O(s) verified cryptid=0%s", res.Scanned, suffix)
@@ -669,6 +685,16 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 	}
 
 	cleanupDecrypt(dev, decryptNoCleanup, stagingRemote, outRemote)
+}
+
+func isAppexPath(name string) bool {
+	for _, part := range strings.Split(name, "/") {
+		if strings.HasSuffix(part, ".appex") {
+			return true
+		}
+	}
+
+	return false
 }
 
 func lookupTargetApp(as *appstore.Client, acc *appstore.Account, target decryptTarget) (appstore.App, error) {
@@ -1097,6 +1123,11 @@ func (p *helperProgress) HandleEvent(ev device.Event) helperUpdate {
 
 	case "spawn_failed":
 		return helperUpdate{note: fmt.Sprintf("could not spawn %s (skipped)", path.Base(ev.Attr("src")))}
+
+	case "appex":
+		if ev.Attr("phase") == "skipped" {
+			return helperUpdate{note: "skipped app extensions"}
+		}
 
 	case "dyld":
 		switch ev.Attr("phase") {
