@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"os/signal"
 	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"syscall"
 
 	"github.com/londek/ipadecrypt/internal/appstore"
 	"github.com/londek/ipadecrypt/internal/config"
@@ -227,14 +230,36 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	defer dev.Close()
+	cleanups := &cleanupStack{}
+	defer cleanups.run()
+
+	// dev.Close pushed first so it runs LAST: remote rm/uninstall need a
+	// live SSH session.
+	cleanups.push(dev.Close)
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
+	go func() {
+		sig, ok := <-sigCh
+		if !ok {
+			return
+		}
+
+		// Second Ctrl-C should hard-kill in case cleanup hangs.
+		signal.Reset(syscall.SIGINT, syscall.SIGTERM)
+		tui.Warn("interrupted (%v), cleaning up (press again to force quit)", sig)
+		cleanups.run()
+		os.Exit(130)
+	}()
 
 	var (
 		uninstall         bool
 		uninstallBundleID string
 	)
 
-	defer func() {
+	cleanups.push(func() {
 		if !uninstall || uninstallBundleID == "" {
 			return
 		}
@@ -245,7 +270,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		}
 
 		tui.OK("uninstalled %s", uninstallBundleID)
-	}()
+	})
 
 	live.Spin("probing device")
 
@@ -316,7 +341,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 				uninstall = decideUninstall(false, decryptForceUninstall, decryptNoUninstall)
 				uninstallBundleID = target.bundleId
 
-				runDecryptOnBundle(dev, helperPath, target.bundleId, installedPath, version, "", "", "", nil)
+				runDecryptOnBundle(dev, cleanups, helperPath, target.bundleId, installedPath, version, "", "", nil)
 
 				return
 			}
@@ -445,11 +470,11 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	defer func() {
+	cleanups.push(func() {
 		if patch.patchedPath != "" {
 			os.Remove(patch.patchedPath)
 		}
-	}()
+	})
 
 	if patch.changed {
 		tui.OK("MinimumOSVersion %s → %s", patch.previousMinOS, probe.IOSVersion)
@@ -479,6 +504,12 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 		return
 	}
+
+	cleanups.push(func() {
+		if plan.stagingRemote != "" && !decryptNoCleanup {
+			dev.Remove(plan.stagingRemote)
+		}
+	})
 
 	if plan.bundlePath == "" {
 		live.Spin("preparing install")
@@ -523,7 +554,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 	uninstall = decideUninstall(install.installed || install.reinstalled, decryptForceUninstall, decryptNoUninstall)
 	uninstallBundleID = appBundleID
 
-	runDecryptOnBundle(dev, plan.helperPath, appBundleID, install.bundlePath, appVersion, plan.stagingRemote, encPath, patch.previousMinOS, patch.previousDeviceFamily)
+	runDecryptOnBundle(dev, cleanups, plan.helperPath, appBundleID, install.bundlePath, appVersion, encPath, patch.previousMinOS, patch.previousDeviceFamily)
 }
 
 // decideUninstall picks the post-decrypt cleanup behavior. weInstalledIt
@@ -594,13 +625,19 @@ func verifyFailureSummary(res pipeline.VerifyResult) string {
 // rewritten back to them after the pull, so the decrypted artifact does
 // not ship with our install-time mutations baked in. Both are empty on
 // the --use-installed path (no patching happened).
-func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, version, stagingRemote, srcIPAPath, originalMinOS string, originalDeviceFamily []int) {
+func runDecryptOnBundle(dev *device.Client, cleanups *cleanupStack, helperPath, bundleID, bundlePath, version, srcIPAPath, originalMinOS string, originalDeviceFamily []int) {
 	outRemote := remoteOutputPath(bundleID, version)
 
 	if err := dev.Mkdir(path.Dir(outRemote)); err != nil {
 		tui.Err("mkdir work: %v", err)
 		return
 	}
+
+	cleanups.push(func() {
+		if !decryptNoCleanup {
+			dev.Remove(outRemote)
+		}
+	})
 
 	live := tui.NewLive()
 	live.Spin("starting helper")
@@ -744,7 +781,6 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 		tui.OK("restored Info.plist (MinimumOSVersion, UIDeviceFamily)")
 	}
 
-	cleanupDecrypt(dev, decryptNoCleanup, stagingRemote, outRemote)
 }
 
 func lookupTargetApp(as *appstore.Client, acc *appstore.Account, target decryptTarget) (appstore.App, error) {
@@ -1002,17 +1038,28 @@ func localOutputPath(override, bundleID, version string) (string, error) {
 	return abs, nil
 }
 
-func cleanupDecrypt(dev *device.Client, noCleanup bool, stagingRemote, outRemote string) {
-	if noCleanup {
-		return
-	}
+// cleanupStack is a LIFO of best-effort cleanup callbacks. Drained on normal
+// return (via defer) and on SIGINT/SIGTERM. Idempotent: a second run() is a
+// no-op so the deferred run after signal-driven run is harmless.
+type cleanupStack struct {
+	mu  sync.Mutex
+	fns []func()
+}
 
-	if stagingRemote != "" {
-		dev.Remove(stagingRemote)
-	}
+func (c *cleanupStack) push(fn func()) {
+	c.mu.Lock()
+	c.fns = append(c.fns, fn)
+	c.mu.Unlock()
+}
 
-	if outRemote != "" {
-		dev.Remove(outRemote)
+func (c *cleanupStack) run() {
+	c.mu.Lock()
+	fns := c.fns
+	c.fns = nil
+	c.mu.Unlock()
+
+	for i := len(fns) - 1; i >= 0; i-- {
+		fns[i]()
 	}
 }
 
