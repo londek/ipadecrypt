@@ -288,7 +288,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 				live.OK("helper ready")
 
-				runDecryptOnBundle(dev, helperPath, target.bundleId, installedPath, version, "", "")
+				runDecryptOnBundle(dev, helperPath, target.bundleId, installedPath, version, "", "", "", nil)
 
 				return
 			}
@@ -490,7 +490,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		live.OK("already installed → %s", install.bundlePath)
 	}
 
-	runDecryptOnBundle(dev, plan.helperPath, appBundleID, install.bundlePath, appVersion, plan.stagingRemote, encPath)
+	runDecryptOnBundle(dev, plan.helperPath, appBundleID, install.bundlePath, appVersion, plan.stagingRemote, encPath, patch.previousMinOS, patch.previousDeviceFamily)
 }
 
 // runDecryptOnBundle runs helper → pull → verify → cleanup on an
@@ -498,7 +498,13 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 // srcIPAPath is the source IPA on the host when one exists (App Store
 // download / cache hit / local --ipa); empty for the use-installed path
 // where the source lives on-device only. Used by --extra-verify.
-func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, version, stagingRemote, srcIPAPath string) {
+//
+// originalMinOS / originalDeviceFamily are the pre-PatchForInstall values
+// from the source IPA; when non-empty the output IPA's Info.plist is
+// rewritten back to them after the pull, so the decrypted artifact does
+// not ship with our install-time mutations baked in. Both are empty on
+// the --use-installed path (no patching happened).
+func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, version, stagingRemote, srcIPAPath, originalMinOS string, originalDeviceFamily []int) {
 	outRemote := remoteOutputPath(bundleID, version)
 
 	if err := dev.Mkdir(path.Dir(outRemote)); err != nil {
@@ -651,6 +657,15 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 
 			live.OK("%d Mach-O(s) byte-match source%s", res.Compared, suffix)
 		}
+	}
+
+	if originalMinOS != "" || len(originalDeviceFamily) > 0 {
+		if err := pipeline.RestoreOriginalPlistValues(outLocal, originalMinOS, originalDeviceFamily); err != nil {
+			tui.Err("restore Info.plist: %v", err)
+			return
+		}
+
+		tui.OK("restored Info.plist (MinimumOSVersion, UIDeviceFamily)")
 	}
 
 	cleanupDecrypt(dev, decryptNoCleanup, stagingRemote, outRemote)

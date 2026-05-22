@@ -52,15 +52,6 @@ func DeviceFamilyName(f int) string {
 	}
 }
 
-type plistPlan struct {
-	data                 []byte // rewritten bytes, or nil if unchanged
-	minOSChanged         bool
-	previousMinOS        string
-	deviceFamilyExpanded bool
-	previousFamily       []int
-	newFamily            []int
-}
-
 // PatchForInstall rewrites the main Info.plist (MinimumOSVersion plus, when
 // patchDeviceType is true, UIDeviceFamily) and drops Watch/ entries. The
 // Info.plist is pre-scanned so a device-family mismatch fails early, without
@@ -68,69 +59,44 @@ type plistPlan struct {
 func PatchForInstall(src, dst, target string, deviceFamily int, patchDeviceType bool) (PatchResult, error) {
 	var res PatchResult
 
-	r, err := zip.OpenReader(src)
-	if err != nil {
-		return res, fmt.Errorf("open %s: %w", src, err)
-	}
-	defer r.Close()
+	edit := func(m map[string]any, format int) ([]byte, error) {
+		dirty := false
 
-	var infoFile *zip.File
-
-	for _, f := range r.File {
-		if isMainAppInfoPlist(f.Name) {
-			infoFile = f
-			break
-		}
-	}
-
-	var plan plistPlan
-	if infoFile != nil {
-		plan, err = planInfoPlist(infoFile, target, deviceFamily, patchDeviceType)
-		if err != nil {
-			return res, err
-		}
-	}
-
-	res.MinOSChanged = plan.minOSChanged
-	res.PreviousMinOS = plan.previousMinOS
-	res.DeviceFamilyExpanded = plan.deviceFamilyExpanded
-	res.PreviousDeviceFamily = plan.previousFamily
-	res.NewDeviceFamily = plan.newFamily
-
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return res, fmt.Errorf("mkdir %s: %w", filepath.Dir(dst), err)
-	}
-
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-	if err != nil {
-		return res, fmt.Errorf("open dst %s: %w", dst, err)
-	}
-	defer out.Close()
-
-	w := zip.NewWriter(out)
-
-	for _, f := range r.File {
-		if isWatchPath(f.Name) {
-			res.WatchRemoved++
-			continue
+		current, _ := m["MinimumOSVersion"].(string)
+		if current != "" && cmpVer(current, target) > 0 {
+			m["MinimumOSVersion"] = target
+			res.MinOSChanged = true
+			res.PreviousMinOS = current
+			dirty = true
 		}
 
-		if f == infoFile && plan.data != nil {
-			if err := writeBytes(f, w, plan.data); err != nil {
-				return res, fmt.Errorf("rewrite %s: %w", f.Name, err)
+		supported := readDeviceFamily(m["UIDeviceFamily"])
+		if deviceFamily > 0 && len(supported) > 0 && !containsInt(supported, deviceFamily) {
+			if !patchDeviceType {
+				return nil, &ErrDeviceFamilyMismatch{Supported: supported, Device: deviceFamily}
 			}
 
-			continue
+			expanded := append(append([]int(nil), supported...), deviceFamily)
+			m["UIDeviceFamily"] = toAnySlice(expanded)
+			res.DeviceFamilyExpanded = true
+			res.PreviousDeviceFamily = supported
+			res.NewDeviceFamily = expanded
+			dirty = true
 		}
 
-		if err := copyEntry(f, w); err != nil {
-			return res, fmt.Errorf("copy %s: %w", f.Name, err)
+		if !dirty {
+			return nil, nil
 		}
+
+		return plist.Marshal(m, format)
 	}
 
-	if err := w.Close(); err != nil {
-		return res, fmt.Errorf("close zip: %w", err)
+	_, removed, err := rewriteIPA(src, dst, edit, true)
+	if err != nil {
+		return res, err
 	}
+
+	res.WatchRemoved = removed
 
 	return res, nil
 }
@@ -165,65 +131,131 @@ func copyEntry(f *zip.File, w *zip.Writer) error {
 	return err
 }
 
-func planInfoPlist(f *zip.File, target string, deviceFamily int, patchDeviceType bool) (plistPlan, error) {
-	var plan plistPlan
-
-	rc, err := f.Open()
+// rewriteIPA streams src → dst, copying every entry verbatim except for the
+// main Info.plist, which is offered to edit. When edit returns non-nil bytes
+// the new contents replace the original; nil bytes leave the entry untouched.
+// When dropWatch is true, Payload/<App>.app/Watch/* entries are dropped.
+//
+// If edit returns an error, dst is not opened — callers get the same
+// "fail before writing a partial output" guarantee the old pre-scan offered.
+// If neither Info.plist nor any Watch entry needs changing, dst is not
+// created at all and (false, 0, nil) is returned, so callers can no-op
+// without paying for a multi-GB copy.
+func rewriteIPA(src, dst string, edit func(map[string]any, int) ([]byte, error), dropWatch bool) (wrote bool, watchRemoved int, err error) {
+	r, err := zip.OpenReader(src)
 	if err != nil {
-		return plan, err
+		return false, 0, fmt.Errorf("open %s: %w", src, err)
 	}
+	defer r.Close()
 
-	data, err := io.ReadAll(rc)
-	rc.Close()
+	var infoFile *zip.File
 
-	if err != nil {
-		return plan, err
-	}
+	hasWatch := false
 
-	var m map[string]any
-
-	format, err := plist.Unmarshal(data, &m)
-	if err != nil {
-		// Not a parseable plist; pass through unchanged.
-		return plan, nil
-	}
-
-	dirty := false
-
-	current, _ := m["MinimumOSVersion"].(string)
-	if current != "" && cmpVer(current, target) > 0 {
-		m["MinimumOSVersion"] = target
-		plan.minOSChanged = true
-		plan.previousMinOS = current
-		dirty = true
-	}
-
-	supported := readDeviceFamily(m["UIDeviceFamily"])
-	if deviceFamily > 0 && len(supported) > 0 && !containsInt(supported, deviceFamily) {
-		if !patchDeviceType {
-			return plan, &ErrDeviceFamilyMismatch{Supported: supported, Device: deviceFamily}
+	for _, f := range r.File {
+		if infoFile == nil && isMainAppInfoPlist(f.Name) {
+			infoFile = f
 		}
 
-		expanded := append(append([]int(nil), supported...), deviceFamily)
-		m["UIDeviceFamily"] = toAnySlice(expanded)
-		plan.deviceFamilyExpanded = true
-		plan.previousFamily = supported
-		plan.newFamily = expanded
-		dirty = true
+		if dropWatch && isWatchPath(f.Name) {
+			hasWatch = true
+		}
 	}
 
-	if !dirty {
-		return plan, nil
+	var newInfo []byte
+
+	if infoFile != nil && edit != nil {
+		rc, err := infoFile.Open()
+		if err != nil {
+			return false, 0, err
+		}
+
+		data, err := io.ReadAll(rc)
+		rc.Close()
+
+		if err != nil {
+			return false, 0, err
+		}
+
+		var m map[string]any
+
+		// Unparseable plists are silently passed through (legacy policy).
+		format, perr := plist.Unmarshal(data, &m)
+		if perr == nil {
+			newInfo, err = edit(m, format)
+			if err != nil {
+				return false, 0, err
+			}
+		}
 	}
 
-	newData, err := plist.Marshal(m, format)
+	if newInfo == nil && !hasWatch {
+		return false, 0, nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return false, 0, fmt.Errorf("mkdir %s: %w", filepath.Dir(dst), err)
+	}
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
-		return plan, fmt.Errorf("marshal plist: %w", err)
+		return false, 0, fmt.Errorf("open dst %s: %w", dst, err)
 	}
 
-	plan.data = newData
+	committed := false
+	defer func() {
+		if !committed {
+			out.Close()
+			os.Remove(dst)
+		}
+	}()
 
-	return plan, nil
+	w := zip.NewWriter(out)
+
+	for _, f := range r.File {
+		if dropWatch && isWatchPath(f.Name) {
+			watchRemoved++
+			continue
+		}
+
+		if f == infoFile && newInfo != nil {
+			if err := writeBytes(f, w, newInfo); err != nil {
+				return false, watchRemoved, fmt.Errorf("rewrite %s: %w", f.Name, err)
+			}
+
+			continue
+		}
+
+		if err := copyEntry(f, w); err != nil {
+			return false, watchRemoved, fmt.Errorf("copy %s: %w", f.Name, err)
+		}
+	}
+
+	if err := w.Close(); err != nil {
+		return false, watchRemoved, fmt.Errorf("close zip: %w", err)
+	}
+
+	if err := out.Close(); err != nil {
+		return false, watchRemoved, err
+	}
+
+	committed = true
+
+	return true, watchRemoved, nil
+}
+
+func intSliceEqual(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+
+	return true
 }
 
 func readDeviceFamily(v any) []int {
@@ -443,102 +475,49 @@ func cmpVer(a, b string) int {
 	return 0
 }
 
-// RestoreOriginalPlistValues rewrites the main Info.plist (MinimumOSVersion and UIDeviceFamily) to their original values in the given IPA file.
+// RestoreOriginalPlistValues rewrites the main Info.plist of an already-built
+// IPA, putting MinimumOSVersion and UIDeviceFamily back to the values
+// captured before PatchForInstall mutated them. The rewrite is atomic
+// (write-to-tmp + rename) and is a no-op when the IPA already matches the
+// originals, so the multi-GB copy is skipped in the common "nothing to do"
+// case.
 func RestoreOriginalPlistValues(ipaPath, originalMinOS string, originalDeviceFamily []int) error {
+	if originalMinOS == "" && len(originalDeviceFamily) == 0 {
+		return nil
+	}
+
 	tmpPath := ipaPath + ".tmp"
 
-	r, err := zip.OpenReader(ipaPath)
-	if err != nil {
-		return fmt.Errorf("open %s: %w", ipaPath, err)
-	}
-	defer r.Close()
+	wrote, _, err := rewriteIPA(ipaPath, tmpPath, func(m map[string]any, format int) ([]byte, error) {
+		dirty := false
 
-	var infoFile *zip.File
-
-	for _, f := range r.File {
-		if isMainAppInfoPlist(f.Name) {
-			infoFile = f
-			break
-		}
-	}
-
-	var data []byte
-
-	if infoFile != nil {
-		rc, err := infoFile.Open()
-		if err != nil {
-			return err
-		}
-
-		originalData, err := io.ReadAll(rc)
-		rc.Close()
-
-		if err != nil {
-			return err
-		}
-
-		var m map[string]any
-
-		format, err := plist.Unmarshal(originalData, &m)
-		if err == nil {
-			dirty := false
-
-			if originalMinOS != "" {
+		if originalMinOS != "" {
+			if cur, _ := m["MinimumOSVersion"].(string); cur != originalMinOS {
 				m["MinimumOSVersion"] = originalMinOS
 				dirty = true
 			}
+		}
 
-			if len(originalDeviceFamily) > 0 {
+		if len(originalDeviceFamily) > 0 {
+			cur := readDeviceFamily(m["UIDeviceFamily"])
+			if !intSliceEqual(cur, originalDeviceFamily) {
 				m["UIDeviceFamily"] = toAnySlice(originalDeviceFamily)
 				dirty = true
 			}
-
-			if dirty {
-				data, err = plist.Marshal(m, format)
-				if err != nil {
-					return err
-				}
-			}
 		}
-	}
 
-	out, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+		if !dirty {
+			return nil, nil
+		}
+
+		return plist.Marshal(m, format)
+	}, false)
 	if err != nil {
-		return fmt.Errorf("open dst %s: %w", tmpPath, err)
-	}
-
-	w := zip.NewWriter(out)
-
-	for _, f := range r.File {
-		if f == infoFile && data != nil {
-			if err := writeBytes(f, w, data); err != nil {
-				out.Close()
-				os.Remove(tmpPath)
-
-				return fmt.Errorf("rewrite %s: %w", f.Name, err)
-			}
-
-			continue
-		}
-
-		if err := copyEntry(f, w); err != nil {
-			out.Close()
-			os.Remove(tmpPath)
-
-			return fmt.Errorf("copy %s: %w", f.Name, err)
-		}
-	}
-
-	if err := w.Close(); err != nil {
-		out.Close()
-		os.Remove(tmpPath)
-
-		return fmt.Errorf("close zip: %w", err)
-	}
-
-	if err := out.Close(); err != nil {
-		os.Remove(tmpPath)
 		return err
+	}
+
+	if !wrote {
+		return nil
 	}
 
 	return os.Rename(tmpPath, ipaPath)

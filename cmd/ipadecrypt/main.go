@@ -86,6 +86,7 @@ func redact(s string) string {
 	if !redactSensitive || s == "" {
 		return s
 	}
+
 	return "######"
 }
 
