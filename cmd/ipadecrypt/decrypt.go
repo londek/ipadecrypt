@@ -291,7 +291,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 				live.OK("helper ready")
 
-				runDecryptOnBundle(dev, helperPath, target.bundleId, installedPath, version, "", "", "", nil)
+				runDecryptOnBundle(dev, helperPath, target.bundleId, installedPath, version, "", "")
 
 				return
 			}
@@ -335,12 +335,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 			return
 		}
 
-		displayEmail := cfg.Apple.Account.Email
-		if idx := strings.Index(displayEmail, "@"); idx > 5 {
-			displayEmail = displayEmail[:5] + "..." + displayEmail[idx:]
-		}
-
-		tui.OK("signed in as %s (%s storefront)", displayEmail, appStoreCountry)
+		tui.OK("signed in as %s (%s storefront)", cfg.Apple.Account.Email, appStoreCountry)
 
 		live = tui.NewLive()
 
@@ -498,7 +493,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		live.OK("already installed → %s", install.bundlePath)
 	}
 
-	runDecryptOnBundle(dev, plan.helperPath, appBundleID, install.bundlePath, appVersion, plan.stagingRemote, encPath, patch.previousMinOS, patch.previousDeviceFamily)
+	runDecryptOnBundle(dev, plan.helperPath, appBundleID, install.bundlePath, appVersion, plan.stagingRemote, encPath)
 }
 
 // runDecryptOnBundle runs helper → pull → verify → cleanup on an
@@ -506,7 +501,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 // srcIPAPath is the source IPA on the host when one exists (App Store
 // download / cache hit / local --ipa); empty for the use-installed path
 // where the source lives on-device only. Used by --extra-verify.
-func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, version, stagingRemote, srcIPAPath, restoreMinOS string, restoreDeviceFamily []int) {
+func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, version, stagingRemote, srcIPAPath string) {
 	outRemote := remoteOutputPath(bundleID, version)
 
 	if err := dev.Mkdir(path.Dir(outRemote)); err != nil {
@@ -670,26 +665,6 @@ func runDecryptOnBundle(dev *device.Client, helperPath, bundleID, bundlePath, ve
 			}
 
 			live.OK("%d Mach-O(s) byte-match source%s", res.Compared, suffix)
-		}
-	}
-
-	if restoreMinOS != "" || len(restoreDeviceFamily) > 0 {
-		live = tui.NewLive()
-		live.Spin("restoring patched Info.plist values")
-
-		if err := pipeline.RestoreOriginalPlistValues(outLocal, restoreMinOS, restoreDeviceFamily); err != nil {
-			live.Fail("restore original Info.plist values failed: %v", err)
-		} else {
-			msg := []string{}
-			if restoreMinOS != "" {
-				msg = append(msg, fmt.Sprintf("MinimumOSVersion to %s", restoreMinOS))
-			}
-
-			if len(restoreDeviceFamily) > 0 {
-				msg = append(msg, fmt.Sprintf("UIDeviceFamily to %v", restoreDeviceFamily))
-			}
-
-			live.OK("restored %s", strings.Join(msg, ", "))
 		}
 	}
 
