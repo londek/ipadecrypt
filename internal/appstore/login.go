@@ -87,13 +87,13 @@ func (c *Client) Login(email, password, authCode string) (*Account, error) {
 	addr := out.Account.Address
 
 	return &Account{
-		Name:                strings.TrimSpace(addr.FirstName + " " + addr.LastName),
 		Email:               out.Account.Email,
 		PasswordToken:       out.PasswordToken,
 		DirectoryServicesID: out.DirectoryServicesID,
 		StoreFront:          res.Header.Get(hdrStoreFront),
 		Password:            password,
 		Pod:                 res.Header.Get(hdrPod),
+		Name:                strings.TrimSpace(addr.FirstName + " " + addr.LastName),
 	}, nil
 }
 

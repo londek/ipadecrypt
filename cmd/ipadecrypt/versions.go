@@ -54,7 +54,7 @@ func versionsHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	if cfg.Apple.Account == nil {
+	if cfg.Apple.Email == "" {
 		tui.Err("environment not configured")
 		tui.Info("run `ipadecrypt bootstrap` first to sign in")
 
@@ -86,7 +86,7 @@ func versionsHandler(cmd *cobra.Command, args []string) {
 		live.Spin("resolving bundleId %s", target.bundleId)
 	}
 
-	app, err := lookupVersionsTargetApp(as, cfg.Apple.Account, target)
+	app, err := lookupVersionsTargetApp(as, cfg.Apple.Account(), target)
 	if err != nil {
 		live.Fail("lookup failed: %v", err)
 		return
@@ -153,13 +153,13 @@ func lookupVersionsTargetApp(as *appstore.Client, acc *appstore.Account, target 
 
 func listVersionsWithAuth(cfg *config.Config, as *appstore.Client, app appstore.App) (appstore.ListVersionsOutput, error) {
 	return withAuth(cfg, as, app, 3, nil, func() (appstore.ListVersionsOutput, error) {
-		return as.ListVersions(cfg.Apple.Account, app)
+		return as.ListVersions(cfg.Apple.Account(), app)
 	})
 }
 
 func getVersionMetadataWithAuth(cfg *config.Config, as *appstore.Client, app appstore.App, extVerID string) (appstore.VersionMetadata, error) {
 	return withAuth(cfg, as, app, 3, nil, func() (appstore.VersionMetadata, error) {
-		return as.GetVersionMetadata(cfg.Apple.Account, app, extVerID)
+		return as.GetVersionMetadata(cfg.Apple.Account(), app, extVerID)
 	})
 }
 

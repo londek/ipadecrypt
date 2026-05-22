@@ -40,22 +40,25 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 	tui.Step(1, 4, "Sign in to the App Store")
 	tui.Info("ipadecrypt requires an Apple ID to download .ipas.\nIt has to the be same Apple ID used on the jailbroken device.\nCredentials are stored locally on this machine.")
 
-	if cfg.Apple.Email == "" {
+	email := cfg.Apple.Email
+	password := cfg.Apple.Password
+
+	if email == "" {
 		s, err := tui.Prompt("Apple ID email")
 		if err != nil {
 			return
 		}
 
-		cfg.Apple.Email = strings.TrimSpace(s)
+		email = strings.TrimSpace(s)
 	}
 
-	if cfg.Apple.Password == "" {
+	if password == "" {
 		s, err := tui.PromptPassword("Apple ID password")
 		if err != nil {
 			return
 		}
 
-		cfg.Apple.Password = s
+		password = s
 	}
 
 	as, err := appstore.New(filepath.Join(paths.Root, "cookies"))
@@ -72,7 +75,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 		live := tui.NewLive()
 		live.Spin("authenticating")
 
-		account, err = as.Login(cfg.Apple.Email, cfg.Apple.Password, authCode)
+		account, err = as.Login(email, password, authCode)
 		switch {
 		case errors.Is(err, appstore.ErrAuthCodeRequired):
 			live.Stop()
@@ -98,7 +101,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	cfg.Apple.Account = account
+	cfg.Apple.SetAccount(account)
 
 	appStoreCountry, err := appstore.CountryCodeFromStoreFront(account.StoreFront)
 	if err != nil {

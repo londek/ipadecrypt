@@ -11,7 +11,7 @@ import (
 	"github.com/londek/ipadecrypt/internal/appstore"
 )
 
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 type Config struct {
 	Version     int         `json:"version"`
@@ -35,9 +35,32 @@ type Versions struct {
 }
 
 type Apple struct {
-	Email    string            `json:"email,omitempty"`
-	Password string            `json:"password,omitempty"`
-	Account  *appstore.Account `json:"account,omitempty"`
+	Email                       string `json:"email,omitempty"`
+	Password                    string `json:"password,omitempty"`
+	PasswordToken               string `json:"passwordToken,omitempty"`
+	DirectoryServicesIdentifier string `json:"directoryServicesIdentifier,omitempty"`
+	StoreFront                  string `json:"storeFront,omitempty"`
+	Pod                         string `json:"pod,omitempty"`
+}
+
+func (a Apple) Account() *appstore.Account {
+	return &appstore.Account{
+		Email:               a.Email,
+		Password:            a.Password,
+		PasswordToken:       a.PasswordToken,
+		DirectoryServicesID: a.DirectoryServicesIdentifier,
+		StoreFront:          a.StoreFront,
+		Pod:                 a.Pod,
+	}
+}
+
+func (a *Apple) SetAccount(acc *appstore.Account) {
+	a.Email = acc.Email
+	a.Password = acc.Password
+	a.PasswordToken = acc.PasswordToken
+	a.DirectoryServicesIdentifier = acc.DirectoryServicesID
+	a.StoreFront = acc.StoreFront
+	a.Pod = acc.Pod
 }
 
 type Device struct {

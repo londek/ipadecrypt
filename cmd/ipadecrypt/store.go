@@ -19,14 +19,18 @@ const (
 )
 
 // reauth refreshes the App Store password token by logging in again with
-// stored credentials. Updates cfg.Apple.Account in place and persists it.
+// stored credentials. Updates cfg.Apple in place and persists it.
 func reauth(cfg *config.Config, as *appstore.Client) error {
+	if cfg.Apple.Email == "" {
+		return errors.New("re-auth: no stored account; run `ipadecrypt bootstrap`")
+	}
+
 	acc, err := as.Login(cfg.Apple.Email, cfg.Apple.Password, "")
 	if err != nil {
 		return fmt.Errorf("re-auth: %w", err)
 	}
 
-	cfg.Apple.Account = acc
+	cfg.Apple.SetAccount(acc)
 
 	if err := cfg.Save(); err != nil {
 		return fmt.Errorf("save config: %w", err)
@@ -39,13 +43,13 @@ func reauth(cfg *config.Config, as *appstore.Client) error {
 // entry). Handles mid-purchase token expiry by re-authenticating once and
 // retrying. ErrLicenseAlreadyExists is treated as success.
 func acquireLicense(cfg *config.Config, as *appstore.Client, app appstore.App) error {
-	err := as.Purchase(cfg.Apple.Account, app)
+	err := as.Purchase(cfg.Apple.Account(), app)
 	if errors.Is(err, appstore.ErrPasswordTokenExpired) {
 		if err := reauth(cfg, as); err != nil {
 			return err
 		}
 
-		err = as.Purchase(cfg.Apple.Account, app)
+		err = as.Purchase(cfg.Apple.Account(), app)
 	}
 
 	if err != nil && !errors.Is(err, appstore.ErrLicenseAlreadyExists) {

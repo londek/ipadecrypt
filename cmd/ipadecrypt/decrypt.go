@@ -207,7 +207,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	if cfg.Apple.Account == nil || cfg.Device.Host == "" {
+	if cfg.Apple.Email == "" || cfg.Device.Host == "" {
 		tui.Err("environment not configured")
 		tui.Info("run `ipadecrypt bootstrap` first to prepare your environment")
 
@@ -354,13 +354,15 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 			return
 		}
 
-		appStoreCountry, err := appstore.CountryCodeFromStoreFront(cfg.Apple.Account.StoreFront)
+		acc := cfg.Apple.Account()
+
+		appStoreCountry, err := appstore.CountryCodeFromStoreFront(acc.StoreFront)
 		if err != nil {
 			tui.Err("resolve appstore country code: %v", err)
 			return
 		}
 
-		tui.OK("signed in as %s (%s storefront)", redact(cfg.Apple.Account.Email), redact(appStoreCountry))
+		tui.OK("signed in as %s (%s storefront)", redact(acc.Email), redact(appStoreCountry))
 
 		live = tui.NewLive()
 
@@ -370,7 +372,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 			live.Spin("resolving bundleId %s", target.bundleId)
 		}
 
-		app, err := lookupTargetApp(as, cfg.Apple.Account, target)
+		app, err := lookupTargetApp(as, acc, target)
 		if err != nil {
 			live.Fail("lookup failed (%s): %v", appStoreCountry, err)
 			return
@@ -778,7 +780,7 @@ func fetchRemoteEncryptedSource(cfg *config.Config, paths *config.Paths, as *app
 	}
 
 	ticket, err := withAuth(cfg, as, app, 3, onAuth, func() (appstore.DownloadTicket, error) {
-		return as.PrepareDownload(cfg.Apple.Account, app, extVerID)
+		return as.PrepareDownload(cfg.Apple.Account(), app, extVerID)
 	})
 	if err != nil {
 		return remoteSourceDisposition{}, err
@@ -797,7 +799,7 @@ func fetchRemoteEncryptedSource(cfg *config.Config, paths *config.Paths, as *app
 		}, nil
 	}
 
-	if _, err := as.CompleteDownload(cfg.Apple.Account, ticket, encPath, onProgress); err != nil {
+	if _, err := as.CompleteDownload(cfg.Apple.Account(), ticket, encPath, onProgress); err != nil {
 		return remoteSourceDisposition{}, fmt.Errorf("%w: %w", errRemoteDownloadFailed, err)
 	}
 
