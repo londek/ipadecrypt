@@ -37,7 +37,8 @@ func (c *Client) Login(email, password, authCode string) (*Account, error) {
 		return nil, err
 	}
 
-	url := endpoint
+	authEndpoint := normalizeAuthEndpoint(endpoint)
+	url := authEndpoint
 
 	var (
 		res *http.Response
@@ -63,6 +64,13 @@ func (c *Client) Login(email, password, authCode string) (*Account, error) {
 			"Content-Type": "application/x-www-form-urlencoded",
 		}, body, formatXML, &out)
 		if err != nil {
+			if discoveredEndpoint := authEndpointFromResponseError(err); discoveredEndpoint != "" && discoveredEndpoint != authEndpoint {
+				authEndpoint = discoveredEndpoint
+				url = authEndpoint
+
+				continue
+			}
+
 			return nil, fmt.Errorf("login: %w", err)
 		}
 

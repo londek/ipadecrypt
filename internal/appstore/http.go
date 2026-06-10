@@ -78,7 +78,13 @@ func (c *Client) send(method, url string, headers map[string]string, body []byte
 		}
 	case formatXML:
 		if _, err := plist.Unmarshal(normalizePlist(data), out); err != nil {
-			return nil, fmt.Errorf("decode plist: %w", err)
+			return nil, &ResponseDecodeError{
+				Cause:       err,
+				StatusCode:  res.StatusCode,
+				ContentType: res.Header.Get("Content-Type"),
+				Body:        truncateBody(data, 500),
+				URLs:        extractURLs(data),
+			}
 		}
 	}
 
@@ -123,4 +129,42 @@ func normalizePlist(body []byte) []byte {
 	}
 
 	return n
+}
+
+type ResponseDecodeError struct {
+	Cause       error
+	StatusCode  int
+	ContentType string
+	Body        string
+	URLs        []string
+}
+
+func (e *ResponseDecodeError) Error() string {
+	return fmt.Sprintf("failed to unmarshal xml: %v", e.Cause)
+}
+
+func (e *ResponseDecodeError) Unwrap() error {
+	return e.Cause
+}
+
+var urlPattern = regexp.MustCompile(`https?://[^\s"'<>]+`)
+
+func extractURLs(body []byte) []string {
+	matches := urlPattern.FindAll(body, -1)
+
+	urls := make([]string, 0, len(matches))
+	for _, match := range matches {
+		urls = append(urls, string(match))
+	}
+
+	return urls
+}
+
+func truncateBody(body []byte, max int) string {
+	trimmed := strings.TrimSpace(string(body))
+	if len(trimmed) <= max {
+		return trimmed
+	}
+
+	return trimmed[:max] + "..."
 }

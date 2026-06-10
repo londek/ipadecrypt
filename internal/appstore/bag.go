@@ -9,6 +9,7 @@ type bagResult struct {
 	URLBag struct {
 		AuthEndpoint string `plist:"authenticateAccount,omitempty"`
 	} `plist:"urlBag,omitempty"`
+	AuthEndpoint string `plist:"authenticateAccount,omitempty"`
 }
 
 // bag fetches the App Store bag.xml and returns the authenticate endpoint URL.
@@ -32,9 +33,5 @@ func (c *Client) bag() (string, error) {
 		return "", fmt.Errorf("bag: status %d", res.StatusCode)
 	}
 
-	if out.URLBag.AuthEndpoint == "" {
-		return "", fmt.Errorf("bag: no authenticate endpoint")
-	}
-
-	return out.URLBag.AuthEndpoint, nil
+	return normalizeAuthEndpoint(out.AuthEndpoint, out.URLBag.AuthEndpoint), nil
 }
