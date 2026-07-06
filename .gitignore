@@ -1,5 +1,7 @@
 *.ipa
+*.exe
 .claude
 dist/
 .grepai/
 .DS_Store
+ipatool-sessions/
