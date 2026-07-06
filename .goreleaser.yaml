@@ -53,7 +53,7 @@ changelog:
 
 release:
   # Owner/name auto-detected from CI environment (GITHUB_REPOSITORY).
-  draft: true
+  draft: false
   prerelease: auto
   extra_files:
     - glob: helper/dist/ipadecrypt-helper-arm64
