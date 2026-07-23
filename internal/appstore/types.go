@@ -69,6 +69,7 @@ var (
 	ErrPasswordTokenExpired   = errors.New("password token expired")
 	ErrLicenseRequired        = errors.New("license required")
 	ErrLicenseAlreadyExists   = errors.New("license already exists")
+	ErrPaidAppNotOwned        = errors.New("account does not own this paid app")
 	ErrSubscriptionRequired   = errors.New("subscription required")
 	ErrTemporarilyUnavailable = errors.New("temporarily unavailable")
 )

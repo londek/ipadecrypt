@@ -30,6 +30,7 @@ var (
 	decryptForceUninstall bool
 	decryptNoUninstall    bool
 	decryptVerbose        bool
+	decryptOwned          bool
 
 	versionsStorefront   string
 	versionsLogResponses bool
@@ -74,6 +75,7 @@ func main() {
 	decrypt.Flags().BoolVar(&decryptForceUninstall, "force-uninstall", false, "always uninstall the app after decryption, even if it was already installed when we started")
 	decrypt.Flags().BoolVar(&decryptNoUninstall, "no-uninstall", false, "never uninstall the app after decryption (default: uninstall only if we installed or replaced it)")
 	decrypt.Flags().BoolVarP(&decryptVerbose, "verbose", "v", false, "stream the on-device helper's LOG/ERR lines to stderr (useful for debugging decryption failures)")
+	decrypt.Flags().BoolVar(&decryptOwned, "owned", false, "allow paid apps: proceed to download a paid app the signed-in Apple ID already owns (never buys; unowned paid apps still fail)")
 
 	versions := &cobra.Command{
 		Use:   "versions <bundle-id|app-store-id|app-store-url>",

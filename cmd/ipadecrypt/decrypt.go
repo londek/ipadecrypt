@@ -411,8 +411,8 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 			return
 		}
 
-		if app.Price > 0 {
-			live.Fail("paid app (price=%v) - unsupported", app.Price)
+		if app.Price > 0 && !decryptOwned {
+			live.Fail("paid app (price=%v) - pass --owned if this Apple ID already owns it", app.Price)
 			return
 		}
 
@@ -437,6 +437,11 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		if err != nil {
 			if errors.Is(err, errRemoteDownloadFailed) {
 				live.Fail("download failed: %v", errors.Unwrap(err))
+				return
+			}
+
+			if errors.Is(err, appstore.ErrPaidAppNotOwned) {
+				live.Fail("paid app not owned by %s. sign in with the Apple ID that purchased it", redact(acc.Email))
 				return
 			}
 
