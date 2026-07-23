@@ -832,7 +832,7 @@ int inject_missing_frameworks(task_t task, mach_port_t exc,
             uint64_t handle = 0;
             int rc = target_call(task, hijack, exc, target_dlopen,
                                   scratch_path, 0x2 /* RTLD_NOW */,
-                                  0, 0, 0, 0, 0, &handle, 3000);
+                                  0, 0, 0, 0, 0, &handle, 15000);
             mach_vm_deallocate(task, scratch_path, spages);
 
             if (rc != 0 || handle == 0) {
