@@ -18,7 +18,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define INJECT_SENTINEL_LR 0x4141414141414141ULL
+// Must stay canonical: AddPAC() poisons pointers whose bits <55:47> are neither
+// all-zero nor all-ones, so any AUT* on such a value is guaranteed to fail.
+#define INJECT_SENTINEL_LR 0x0000000041414141ULL
 
 // pid_resume comes from libsystem_kernel as an undocumented entry; declare
 // it here so we don't depend on private headers.
