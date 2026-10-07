@@ -27,11 +27,11 @@ func (c *Client) bag() (SAPConfig, error) {
 		return SAPConfig{}, err
 	}
 
-	url := fmt.Sprintf("https://%s%s?guid=%s", initDomain, initPath, g)
+	bagURL := fmt.Sprintf("https://%s%s?guid=%s", initDomain, initPath, g)
 
 	var out bagResult
 
-	res, err := c.send(http.MethodGet, url, map[string]string{"Accept": "application/xml"}, nil, nil, formatXML, &out)
+	res, err := c.send(http.MethodGet, bagURL, map[string]string{"Accept": "application/xml"}, nil, nil, formatXML, &out)
 	if err != nil {
 		return SAPConfig{}, fmt.Errorf("bag: %w", err)
 	}
@@ -56,6 +56,16 @@ func (c *Client) bag() (SAPConfig, error) {
 	if err := validateSAPConfig(config); err != nil {
 		return SAPConfig{}, fmt.Errorf("bag: %w", err)
 	}
+
+	authEndpoint, err := url.Parse(config.AuthEndpoint)
+	if err != nil {
+		return SAPConfig{}, fmt.Errorf("bag: parse authentication endpoint: %w", err)
+	}
+
+	// The bare path returns unusable responses (204/301/HTML); Apple only
+	// answers the signed authenticate request on the slashed path.
+	authEndpoint.Path = PrivateAppStoreAPIPathAuth + "/"
+	config.AuthEndpoint = authEndpoint.String()
 
 	return config, nil
 }
@@ -98,7 +108,7 @@ func validateAuthenticationEndpoint(endpoint string) error {
 		return fmt.Errorf("unsupported authentication endpoint %q", endpoint)
 	}
 
-	if parsed.Path != PrivateAppStoreAPIPathAuth {
+	if parsed.Path != PrivateAppStoreAPIPathAuth && parsed.Path != PrivateAppStoreAPIPathAuth+"/" {
 		return fmt.Errorf("unsupported authentication endpoint %q", endpoint)
 	}
 
