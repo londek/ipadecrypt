@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	apphttp "github.com/londek/ipadecrypt/internal/apphttp"
 	"howett.net/plist"
 )
 
@@ -35,19 +37,6 @@ type DownloadTicket struct {
 // version of the specific release this ticket describes. Empty if absent.
 func (t DownloadTicket) Version() string {
 	return metaString(t.Metadata, "bundleShortVersionString")
-}
-
-// ExternalVersionID returns the stable App Store identifier for this
-// specific release (e.g. "847134900"). Useful as a cache key since it can't
-// collide across releases the way human version strings can.
-func (t DownloadTicket) ExternalVersionID() string {
-	return metaString(t.Metadata, "softwareVersionExternalIdentifier")
-}
-
-// BundleID returns softwareVersionBundleId from the metadata - handy when
-// the caller doesn't already know it.
-func (t DownloadTicket) BundleID() string {
-	return metaString(t.Metadata, "softwareVersionBundleId")
 }
 
 // FileSize returns the IPA download size in bytes as reported by the
@@ -136,35 +125,137 @@ func (c *Client) PrepareDownload(acc *Account, app App, externalVersionID string
 	return DownloadTicket(item), nil
 }
 
-// volumeDownload is the shared POST to the volumeStoreDownloadProduct
-// endpoint used for both authorized downloads and metadata-only lookups
-// (list versions, get per-version metadata). The endpoint is the same;
-// whether externalVersionID is set decides what is returned.
+// volumeDownload authorizes a download (or a metadata-only lookup) and returns
+// the chosen item. It tries the per-pod volumeStore endpoint first and, when
+// that returns an empty songList or a "no longer available" response (Apple
+// moved post-2026-09 builds off it), falls back to the bag's redownload and
+// update endpoints. Used by PrepareDownload, ListVersions and
+// GetVersionMetadata - the request shape is identical, externalVersionID
+// decides what comes back.
 func (c *Client) volumeDownload(acc *Account, app App, externalVersionID string) (downloadItem, error) {
 	g, err := guid()
 	if err != nil {
 		return downloadItem{}, err
 	}
 
-	podPrefix := ""
-	if acc.Pod != "" {
-		podPrefix = "p" + acc.Pod + "-"
+	// Prefer the attested ent/download path (the one Apple's modern AMS framework
+	// fully supports). Fall back to the legacy volumeStore chain when it is not
+	// available for this account/app.
+	if item, handled, entErr := c.entDownload(acc, app, g, externalVersionID); handled {
+		return item, entErr
 	}
 
-	url := fmt.Sprintf("https://%s%s%s?guid=%s", podPrefix, storeDomain, downloadPath, g)
+	res, _, err := c.postDownloadProduct(podVolumeStoreURL(acc), downloadVersionKeyVolumeStore, acc, app, g, externalVersionID)
+	if err != nil {
+		return downloadItem{}, err
+	}
 
+	if item, decided, ferr := classifyDownload(res); decided {
+		return item, ferr
+	}
+
+	return c.downloadProductFallback(acc, app, g, externalVersionID)
+}
+
+// downloadProductFallback runs after the legacy volumeStore endpoint returns an
+// empty or unavailable response: it resolves the current external version id
+// (when unpinned), retries against the bag's redownload endpoint, and finally
+// the update endpoint.
+func (c *Client) downloadProductFallback(acc *Account, app App, g, externalVersionID string) (downloadItem, error) {
+	bag, err := c.fetchURLBag()
+	if err != nil {
+		return downloadItem{}, fmt.Errorf("download: bag for fallback: %w", err)
+	}
+
+	if bag.RedownloadEndpoint == "" {
+		return downloadItem{}, errors.New("download: empty songList")
+	}
+
+	redownloadURL, err := downloadDispatchURL(bag.RedownloadEndpoint, redownloadProductPath)
+	if err != nil {
+		return downloadItem{}, err
+	}
+
+	if externalVersionID == "" {
+		externalVersionID, err = c.lookupLatestExternalVersionID(acc, app)
+		if err != nil {
+			return downloadItem{}, fmt.Errorf("download: resolve latest version for redownload: %w", err)
+		}
+
+		debugf("fallback resolved externalVersionID=%q for app %d (%s)", externalVersionID, app.ID, app.BundleID)
+	}
+
+	redoRes, redoStatus, redoErr := c.postDownloadProduct(redownloadURL, downloadVersionKeyRedownload, acc, app, g, externalVersionID)
+	if redoErr == nil {
+		if redoStatus == http.StatusForbidden {
+			return downloadItem{}, ErrModernDownloadUnsupported
+		}
+
+		if item, decided, ferr := classifyDownload(redoRes); decided {
+			return item, ferr
+		}
+	}
+
+	// ipatool parity: the update endpoint only helps when redownload came back as
+	// an empty HTTP 500 or a message-only "no longer available" response.
+	emptyServer := redoErr == nil && redoStatus == http.StatusInternalServerError
+	unavailable := redoErr == nil && redoStatus == http.StatusOK && isUnavailableDownload(redoRes)
+
+	if bag.UpdateEndpoint != "" && externalVersionID != "" && (emptyServer || unavailable) {
+		updateURL, err := downloadDispatchURL(bag.UpdateEndpoint, updateProductPath)
+		if err != nil {
+			return downloadItem{}, err
+		}
+
+		updRes, updStatus, updErr := c.postDownloadProduct(updateURL, downloadVersionKeyRedownload, acc, app, g, externalVersionID)
+		if updErr != nil {
+			return downloadItem{}, fmt.Errorf("download: update request: %w", updErr)
+		}
+
+		if updStatus == http.StatusForbidden {
+			return downloadItem{}, ErrModernDownloadUnsupported
+		}
+
+		if err := validateVersionedDownload(updRes, app, externalVersionID); err != nil {
+			return downloadItem{}, err
+		}
+
+		if item, decided, ferr := classifyDownload(updRes); decided {
+			return item, ferr
+		}
+	}
+
+	if redoErr != nil {
+		return downloadItem{}, fmt.Errorf("download: redownload request: %w", redoErr)
+	}
+
+	return downloadItem{}, errors.New("download: empty songList")
+}
+
+// isUnavailableDownload reports the message-only "no longer available" response
+// Apple returns on HTTP 200 with no failure and no items. Mirrors ipatool's
+// isUnavailableDownloadProductResponse.
+func isUnavailableDownload(res downloadResult) bool {
+	msg := strings.ToLower(strings.TrimSpace(res.CustomerMessage))
+
+	return res.FailureType == "" && len(res.Items) == 0 &&
+		(msg == "no longer available" || strings.HasSuffix(msg, " no longer available"))
+}
+
+// postDownloadProduct sends a single download-product POST to a fully-formed
+// endpoint and returns the parsed response and its HTTP status. It errors only
+// on transport or decode failures; emptiness, HTTP status and structured
+// failures are left to the caller (the download-dispatch endpoints answer 403
+// without device attestation and an empty 500 when a version must be updated).
+func (c *Client) postDownloadProduct(baseURL, versionKey string, acc *Account, app App, g, externalVersionID string) (downloadResult, int, error) {
 	payload := map[string]any{
 		"creditDisplay": "",
 		"guid":          g,
 		"salableAdamId": app.ID,
+		"serialNumber":  "0",
 	}
 	if externalVersionID != "" {
-		payload["externalVersionId"] = externalVersionID
-	}
-
-	body, err := plistBody(payload)
-	if err != nil {
-		return downloadItem{}, err
+		payload[versionKey] = externalVersionID
 	}
 
 	headers := map[string]string{
@@ -174,27 +265,88 @@ func (c *Client) volumeDownload(acc *Account, app App, externalVersionID string)
 	}
 
 	var out downloadResult
-	if _, err := c.send(http.MethodPost, url, headers, body, formatXML, &out); err != nil {
-		return downloadItem{}, fmt.Errorf("download: %w", err)
+
+	res, err := c.send("request", http.MethodPost, fmt.Sprintf("%s?guid=%s", baseURL, g), headers, &apphttp.XMLPayload{Content: payload}, nil, formatXML, &out)
+	if err != nil {
+		debugf("downloadProduct %s key=%s ver=%q: send error: %v", baseURL, versionKey, externalVersionID, err)
+		return downloadResult{}, 0, fmt.Errorf("download: %w", err)
 	}
 
+	debugf("downloadProduct %s key=%s ver=%q: status=%d failureType=%q customerMessage=%q items=%d",
+		baseURL, versionKey, externalVersionID, res.StatusCode, out.FailureType, out.CustomerMessage, len(out.Items))
+
+	return out, res.StatusCode, nil
+}
+
+// classifyDownload interprets a download-product response. decided is false
+// only for an empty or "no longer available" response, which signals the
+// caller to fall back to another endpoint.
+func classifyDownload(res downloadResult) (item downloadItem, decided bool, err error) {
 	switch {
-	case out.FailureType == failurePasswordTokenExpired,
-		out.FailureType == failureSignInRequired,
-		out.FailureType == failureDeviceVerificationFailed,
-		out.FailureType == failureLicenseAlreadyExists:
-		return downloadItem{}, ErrPasswordTokenExpired
-	case out.FailureType == failureLicenseNotFound:
-		return downloadItem{}, ErrLicenseRequired
-	case out.FailureType != "" && out.CustomerMessage != "":
-		return downloadItem{}, errors.New(out.CustomerMessage)
-	case out.FailureType != "":
-		return downloadItem{}, fmt.Errorf("download: %s", out.FailureType)
-	case len(out.Items) == 0:
-		return downloadItem{}, errors.New("download: empty songList")
+	case res.FailureType == failurePasswordTokenExpired,
+		res.FailureType == failureSignInRequired,
+		res.FailureType == failureDeviceVerificationFailed,
+		res.FailureType == failureLicenseAlreadyExists:
+		return downloadItem{}, true, ErrPasswordTokenExpired
+	case res.FailureType == failureLicenseNotFound:
+		return downloadItem{}, true, ErrLicenseRequired
+	case res.FailureType != "" && res.CustomerMessage != "":
+		return downloadItem{}, true, errors.New(res.CustomerMessage)
+	case res.FailureType != "":
+		return downloadItem{}, true, fmt.Errorf("download: %s", res.FailureType)
+	case len(res.Items) > 0:
+		return res.Items[0], true, nil
 	}
 
-	return out.Items[0], nil
+	return downloadItem{}, false, nil
+}
+
+// validateVersionedDownload confirms a redownload/update response matches the
+// requested app and pinned version, guarding against the endpoint returning a
+// different build or platform.
+func validateVersionedDownload(res downloadResult, app App, externalVersionID string) error {
+	if res.FailureType != "" {
+		return nil
+	}
+
+	if len(res.Items) != 1 {
+		return errors.New("download: update response must contain exactly one item")
+	}
+
+	meta := res.Items[0].Metadata
+	if metaString(meta, "itemId") != fmt.Sprint(app.ID) ||
+		metaString(meta, "softwareVersionExternalIdentifier") != externalVersionID {
+		return errors.New("download: update response does not match the requested app or version")
+	}
+
+	bundleID := metaString(meta, "softwareVersionBundleId")
+	if bundleID == "" || (app.BundleID != "" && bundleID != app.BundleID) {
+		return errors.New("download: update response does not match the requested bundle identifier")
+	}
+
+	return nil
+}
+
+func podVolumeStoreURL(acc *Account) string {
+	podPrefix := ""
+	if acc.Pod != "" {
+		podPrefix = "p" + acc.Pod + "-"
+	}
+
+	return fmt.Sprintf("https://%s%s%s", podPrefix, storeDomain, downloadPath)
+}
+
+// downloadDispatchURL validates a bag-provided redownload/update endpoint:
+// it must be an exact https://downloaddispatch.itunes.apple.com URL on the
+// expected path with no query, fragment or userinfo.
+func downloadDispatchURL(endpoint, path string) (string, error) {
+	parsed, err := url.ParseRequestURI(endpoint)
+	if err != nil || parsed.Scheme != "https" || parsed.Host != downloadDispatchDomain ||
+		parsed.Path != path || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.User != nil {
+		return "", fmt.Errorf("download: invalid %s endpoint in bag", path)
+	}
+
+	return endpoint, nil
 }
 
 // CompleteDownload fetches the IPA described by `ticket` into outPath.

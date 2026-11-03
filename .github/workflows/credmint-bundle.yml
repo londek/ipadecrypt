@@ -1,0 +1,41 @@
+name: credmint bundle drift
+
+# The signed arm64 iOS mint programs under internal/credmint/bundle/ are built
+# reproducibly in a pinned Docker toolchain. This job rebuilds them from the
+# pinned fairplay-decrypt sources and byte-compares against the committed
+# bundle, so the committed binaries can't drift from their sources.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'internal/credmint/toolchain/**'
+      - 'internal/credmint/bundle/**'
+  pull_request:
+    paths:
+      - 'internal/credmint/toolchain/**'
+      - 'internal/credmint/bundle/**'
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    name: verify credmint bundle drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: rebuild bundle in pinned toolchain
+        env:
+          IPADECRYPT_CREDMINT_IMAGE: build
+        run: ./internal/credmint/toolchain/build.sh
+
+      - name: verify no drift vs committed bundle
+        run: |
+          if ! git diff --quiet -- internal/credmint/bundle; then
+            echo "::error::credmint bundle drift - rebuild via internal/credmint/toolchain/build.sh and commit internal/credmint/bundle"
+            git --no-pager diff --stat -- internal/credmint/bundle
+            exit 1
+          fi
+          echo "credmint bundle matches its pinned sources"

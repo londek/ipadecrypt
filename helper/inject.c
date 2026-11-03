@@ -18,7 +18,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define INJECT_SENTINEL_LR 0x4141414141414141ULL
+// Must stay canonical: AddPAC() poisons pointers whose bits <55:47> are neither
+// all-zero nor all-ones, so any AUT* on such a value is guaranteed to fail.
+#define INJECT_SENTINEL_LR 0x0000000041414141ULL
 
 // pid_resume comes from libsystem_kernel as an undocumented entry; declare
 // it here so we don't depend on private headers.
@@ -832,7 +834,7 @@ int inject_missing_frameworks(task_t task, mach_port_t exc,
             uint64_t handle = 0;
             int rc = target_call(task, hijack, exc, target_dlopen,
                                   scratch_path, 0x2 /* RTLD_NOW */,
-                                  0, 0, 0, 0, 0, &handle, 3000);
+                                  0, 0, 0, 0, 0, &handle, 15000);
             mach_vm_deallocate(task, scratch_path, spages);
 
             if (rc != 0 || handle == 0) {

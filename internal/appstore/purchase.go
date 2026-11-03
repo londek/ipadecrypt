@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+
+	apphttp "github.com/londek/ipadecrypt/internal/apphttp"
 )
 
 type purchaseResult struct {
@@ -16,6 +18,10 @@ type purchaseResult struct {
 // Purchase acquires a license for the given app on the signed-in account.
 // Tries the App Store pricing family first, falls back to Arcade.
 func (c *Client) Purchase(acc *Account, app App) error {
+	if app.Price > 0 {
+		return ErrPaidAppNotOwned
+	}
+
 	g, err := guid()
 	if err != nil {
 		return err
@@ -39,7 +45,7 @@ func (c *Client) purchaseWithParams(acc *Account, app App, g, params string) err
 		"X-Token":             acc.PasswordToken,
 	}
 
-	body, err := plistBody(map[string]any{
+	payload := map[string]any{
 		"appExtVrsId":               "0",
 		"hasAskedToFulfillPreorder": "true",
 		"buyWithoutAuthorization":   "true",
@@ -52,14 +58,11 @@ func (c *Client) purchaseWithParams(acc *Account, app App, g, params string) err
 		"pricingParameters":         params,
 		"productType":               "C",
 		"salableAdamId":             app.ID,
-	})
-	if err != nil {
-		return err
 	}
 
 	var out purchaseResult
 
-	res, err := c.send(http.MethodPost, url, headers, body, formatXML, &out)
+	res, err := c.send("purchase", http.MethodPost, url, headers, &apphttp.XMLPayload{Content: payload}, nil, formatXML, &out)
 	if err != nil {
 		return fmt.Errorf("purchase: %w", err)
 	}

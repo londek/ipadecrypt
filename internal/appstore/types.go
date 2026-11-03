@@ -52,16 +52,30 @@ const (
 	downloadPath = "/WebObjects/MZFinance.woa/wa/volumeStoreDownloadProduct"
 	authURL      = "https://buy.itunes.apple.com/WebObjects/MZFinance.woa/wa/authenticate"
 
+	// Download fallback endpoints (bag-provided). Apple moved builds published
+	// on/after 2026-09 off the per-pod volumeStore endpoint; those return an
+	// empty songList and must be fetched via the bag's redownload/update paths.
+	downloadDispatchDomain = "downloaddispatch." + iTunesDomain
+	redownloadProductPath  = "/r/redownload"
+	updateProductPath      = "/up/updateProduct"
+
+	downloadVersionKeyVolumeStore = "externalVersionId"
+	downloadVersionKeyRedownload  = "appExtVrsId"
+
+	// PrivateAppStoreAPIPathAuth is the exact path Apple accepts for the signed
+	// authenticate endpoint (optionally on a <pod>-buy.itunes.apple.com host).
+	PrivateAppStoreAPIPathAuth = "/WebObjects/MZFinance.woa/wa/authenticate"
+
 	PrivateAuthDomain     = "auth." + iTunesDomain
 	PrivateAuthPathNative = "/auth/v1/native/fast/"
 
 	hdrStoreFront = "X-Set-Apple-Store-Front"
 	hdrPod        = "pod"
 
+	supportedSAPVersion = 200
+
 	pricingAppStore    = "STDQ"
 	pricingAppleArcade = "GAME"
-
-	defaultUserAgent = "Configurator/2.17 (Macintosh; OS X 15.2; 24C5089c) AppleWebKit/0620.1.16.11.6"
 )
 
 var (
@@ -69,6 +83,14 @@ var (
 	ErrPasswordTokenExpired   = errors.New("password token expired")
 	ErrLicenseRequired        = errors.New("license required")
 	ErrLicenseAlreadyExists   = errors.New("license already exists")
+	ErrPaidAppNotOwned        = errors.New("account does not own this paid app")
 	ErrSubscriptionRequired   = errors.New("subscription required")
 	ErrTemporarilyUnavailable = errors.New("temporarily unavailable")
+
+	// ErrModernDownloadUnsupported reports that Apple will only serve this app's
+	// current build through the attested download-dispatch endpoints (they answer
+	// HTTP 403 without device attestation), which ipadecrypt does not implement
+	// yet. Older builds served by the legacy store endpoint, and local .ipa
+	// files, are unaffected.
+	ErrModernDownloadUnsupported = errors.New("this build needs App Store device attestation ipadecrypt does not implement yet")
 )

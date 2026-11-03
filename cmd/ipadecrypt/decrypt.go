@@ -4,63 +4,30 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/url"
 	"os"
 	"os/signal"
-	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 
 	"github.com/londek/ipadecrypt/internal/appstore"
 	"github.com/londek/ipadecrypt/internal/config"
-	"github.com/londek/ipadecrypt/internal/device"
+	"github.com/londek/ipadecrypt/internal/fairplay"
 	"github.com/londek/ipadecrypt/internal/pipeline"
 	"github.com/londek/ipadecrypt/internal/tui"
 	"github.com/londek/ipadecrypt/internal/updater"
 	"github.com/spf13/cobra"
 )
 
-var (
-	appStoreIdRegex = regexp.MustCompile(`/id(\d+)`)
-
-	errAppinstNotFound = errors.New("appinst not found")
-)
+var appStoreIdRegex = regexp.MustCompile(`/id(\d+)`)
 
 type decryptTarget struct {
 	localPath string
 	bundleId  string
 	appId     string
-}
-
-type patchResult struct {
-	uploadPath           string
-	patchedPath          string
-	changed              bool
-	previousMinOS        string
-	watchStripped        int
-	deviceFamilyExpanded bool
-	previousDeviceFamily []int
-	newDeviceFamily      []int
-}
-
-type installPlan struct {
-	helperPath    string
-	appinstPath   string
-	bundleID      string
-	bundlePath    string
-	stagingRemote string
-}
-
-type installResult struct {
-	bundlePath      string
-	installed       bool
-	reinstalled     bool
-	previousVersion string
 }
 
 type sourceDisposition byte
@@ -69,34 +36,6 @@ const (
 	sourceDispositionCached sourceDisposition = iota + 1
 	sourceDispositionDownloaded
 )
-
-type installEvent int
-
-const (
-	installHashIPA installEvent = iota + 1
-	installHashInstalled
-	installReadInstalledVersion
-	installReplaceInstalled
-	installUpload
-	installRunAppinst
-	installRescan
-)
-
-type helperUpdate struct {
-	spin         string
-	note         string
-	progress     bool
-	progressCur  int64
-	progressMax  int64
-	progressText string
-}
-
-type helperProgress struct {
-	dumpedTotal      atomic.Int64
-	dumpedMain       atomic.Int64
-	dumpedFrameworks atomic.Int64
-	dumpedOther      atomic.Int64
-}
 
 func parseDecryptArg(raw string) (decryptTarget, error) {
 	// App Store URL
@@ -186,8 +125,8 @@ func humanBytes(n int64) string {
 }
 
 func decryptHandler(cmd *cobra.Command, args []string) {
-	if decryptFromAppStore && decryptUseInstalled {
-		tui.Err("--from-appstore and --use-installed are mutually exclusive; pass at most one.")
+	if decryptOnDevice && decryptNoOnDevice {
+		tui.Err("--on-device and --no-on-device are mutually exclusive; pass at most one.")
 		return
 	}
 
@@ -202,7 +141,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	upd := updater.Start(context.Background(), Version, cfg)
+	upd := updater.Start(context.Background(), resolveVersion(), cfg)
 	defer upd.Wait()
 
 	target, err := parseDecryptArg(args[0])
@@ -211,32 +150,30 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	if cfg.Apple.Email == "" || cfg.Device.Host == "" {
-		tui.Err("environment not configured")
-		tui.Info("run `ipadecrypt bootstrap` first to prepare your environment")
+	// The decryption credential is required only for the offline path;
+	// --on-device decrypts via the device's own FairPlay and skips it.
+	var credential []byte
 
-		return
-	}
+	if !decryptOnDevice {
+		dsid := cfg.Apple.DirectoryServicesIdentifier
+		if dsid == "" {
+			tui.Err("no Apple account configured")
+			tui.Info("run `ipadecrypt bootstrap` to sign in and mint your decryption credential")
 
-	//
-	// Connect to device and probe environment
-	//
+			return
+		}
 
-	live := tui.NewLive()
-	live.Spin("connecting to %s@%s", cfg.Device.User, cfg.Device.Host)
+		credential, err = loadCachedCredential(paths, dsid)
+		if err != nil {
+			tui.Err("no decryption credential for this account: %v", err)
+			tui.Info("run `ipadecrypt bootstrap` to mint it (one-time, needs your jailbroken device)")
 
-	dev, err := device.Connect(context.Background(), cfg.Device)
-	if err != nil {
-		live.Fail("ssh connect failed: %v", err)
-		return
+			return
+		}
 	}
 
 	cleanups := &cleanupStack{}
 	defer cleanups.run()
-
-	// dev.Close pushed first so it runs LAST: remote rm/uninstall need a
-	// live SSH session.
-	cleanups.push(dev.Close)
 
 	sigCh := make(chan os.Signal, 1)
 
@@ -249,113 +186,14 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 			return
 		}
 
-		// Second Ctrl-C should hard-kill in case cleanup hangs.
 		signal.Reset(syscall.SIGINT, syscall.SIGTERM)
 		tui.Warn("interrupted (%v), cleaning up (press again to force quit)", sig)
 		cleanups.run()
 		os.Exit(130)
 	}()
 
-	var (
-		uninstall           bool
-		uninstallBundleID   string
-		uninstallBundlePath string
-	)
-
-	cleanups.push(func() {
-		if !uninstall || uninstallBundlePath == "" {
-			return
-		}
-
-		if err := dev.Uninstall(uninstallBundlePath); err != nil {
-			tui.Err("uninstall %s: %v", uninstallBundleID, err)
-			return
-		}
-
-		tui.OK("uninstalled %s", uninstallBundleID)
-	})
-
-	live.Spin("probing device")
-
-	probe, err := dev.Probe()
-	if err != nil {
-		live.Fail("probe failed: %v", err)
-		return
-	}
-
-	live.OK("ipadecrypt %s · %s@%s iOS %s %s %s (%s)", Version, cfg.Device.User, cfg.Device.Host, probe.IOSVersion, probe.Arch, probe.Model, probe.Jailbreak)
-
-	if target.bundleId != "" && !decryptFromAppStore {
-		live = tui.NewLive()
-		live.Spin("checking if %s is installed", target.bundleId)
-
-		installedPath, canonicalID, err := dev.FindInstalledByBundleID(target.bundleId)
-		if err != nil {
-			live.Fail("scan failed: %v", err)
-			return
-		}
-
-		if installedPath != "" {
-			target.bundleId = canonicalID
-
-			version, err := dev.InstalledVersion(installedPath)
-			if err != nil || version == "" {
-				version = "unknown"
-			}
-
-			live.OK("found installed %s v%s", target.bundleId, version)
-
-			useInstalled := decryptUseInstalled
-			if !useInstalled {
-				if !tui.IsTTY() {
-					tui.Err("%s v%s is already installed on the device.", target.bundleId, version)
-					tui.Info("pass --use-installed to decrypt the installed build, --from-appstore to fetch fresh and reinstall, or run in a TTY.")
-
-					return
-				}
-
-				idx, err := tui.Select(
-					fmt.Sprintf("%s v%s is already installed - which build do you want decrypted?", target.bundleId, version),
-					[]string{
-						fmt.Sprintf("Installed on device v%s", version),
-						"Latest from App Store (will reinstall)",
-					},
-				)
-				if err != nil {
-					tui.Err("%v", err)
-					return
-				}
-
-				useInstalled = idx == 0
-			}
-
-			if useInstalled {
-				live = tui.NewLive()
-				live.Spin("preparing helper")
-
-				helperPath, err := dev.EnsureHelper()
-				if err != nil {
-					live.Fail("helper upload: %v", err)
-					return
-				}
-
-				live.OK("helper ready")
-
-				uninstall = decideUninstall(false, decryptForceUninstall, decryptNoUninstall)
-				uninstallBundleID = target.bundleId
-				uninstallBundlePath = installedPath
-
-				runDecryptOnBundle(dev, cleanups, helperPath, target.bundleId, installedPath, version, "")
-
-				return
-			}
-		} else {
-			live.OK("%s not installed; will fetch from App Store", target.bundleId)
-		}
-	}
-
 	//
-	// Acquire encrypted IPA, either from the App Store or a local path
+	// Acquire the encrypted IPA, either from the App Store or a local path.
 	//
 
 	var (
@@ -377,6 +215,13 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 		tui.OK("%s v%s", appBundleID, appVersion)
 	} else {
+		if cfg.Apple.Email == "" {
+			tui.Err("this app must be downloaded from the App Store, but no Apple ID is configured")
+			tui.Info("run `ipadecrypt bootstrap` to sign in, or decrypt a local .ipa instead")
+
+			return
+		}
+
 		as, err := appstore.New(filepath.Join(paths.Root, "cookies"))
 		if err != nil {
 			tui.Err("appstore client: %v", err)
@@ -397,7 +242,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 		tui.OK("signed in as %s (%s storefront)", redact(acc.Email), redact(appStoreCountry))
 
-		live = tui.NewLive()
+		live := tui.NewLive()
 
 		if target.appId != "" {
 			live.Spin("resolving appId %s", target.appId)
@@ -435,6 +280,19 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 				return
 			}
 
+			if errors.Is(err, appstore.ErrPaidAppNotOwned) {
+				live.Fail("paid app not owned by %s. sign in with the Apple ID that purchased it", redact(acc.Email))
+				return
+			}
+
+			if errors.Is(err, appstore.ErrModernDownloadUnsupported) {
+				live.Fail("can't download this build from the App Store yet")
+				tui.Info("Apple now requires device attestation for this app's current build; its download endpoints answer HTTP 403.")
+				tui.Info("ipadecrypt doesn't implement that yet. Decrypt a local .ipa instead: `ipadecrypt decrypt <file>.ipa`")
+
+				return
+			}
+
 			live.Fail("prepare failed: %v", err)
 
 			return
@@ -452,127 +310,183 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 	}
 
 	//
-	// Patching MinimumOSVersion if needed
+	// Decrypt: offline FairPlay first (no device); fall back to on-device
+	// decryption for apps the arm64-only offline path can't fully handle
+	// (e.g. old builds that still ship a 32-bit slice).
 	//
 
-	live = tui.NewLive()
-	live.Spin("patching Info.plist %s", probe.IOSVersion)
-
-	patch, err := patchSourceForDevice(encPath, probe.IOSVersion, probe.DeviceFamily, decryptPatchDevType)
+	outLocal, err := localOutputPath(decryptOutput, appBundleID, appVersion)
 	if err != nil {
-		var dfErr *pipeline.ErrDeviceFamilyMismatch
-		if errors.As(err, &dfErr) {
-			live.Fail("device family mismatch: app supports %v, device is %d (%s) - pass --patch-device-type to install anyway",
-				dfErr.Supported, dfErr.Device, pipeline.DeviceFamilyName(dfErr.Device))
+		tui.Err("output path: %v", err)
+		return
+	}
+
+	if err := os.MkdirAll(filepath.Dir(outLocal), 0o755); err != nil {
+		tui.Err("mkdir local: %v", err)
+		return
+	}
+
+	deviceConfigured := cfg.Device.Host != "" || cfg.Device.USB
+
+	if !decryptOnDevice {
+		switch attemptOfflineDecrypt(encPath, credential, outLocal) {
+		case offlineDone, offlineFatal:
+			return
+		}
+
+		// offlineNeedsDevice: the offline arm64 decrypt left a slice
+		// encrypted (or couldn't handle the app). Decide on the fallback.
+		switch {
+		case decryptNoOnDevice:
+			tui.Warn("offline decrypt left encrypted slice(s); on-device fallback suppressed (--no-on-device)")
+			return
+		case !deviceConfigured:
+			tui.Err("offline decryption couldn't fully decrypt this app (commonly an old build that still ships a 32-bit slice); on-device decryption is required")
+			tui.Info("run `ipadecrypt bootstrap` to set up your jailbroken device, then re-run")
 
 			return
 		}
 
-		live.Fail("patch Info.plist failed: %v", err)
+		tui.Info("falling back to on-device decryption")
+	} else if !deviceConfigured {
+		tui.Err("--on-device needs a configured jailbroken device")
+		tui.Info("run `ipadecrypt bootstrap` to set one up")
 
 		return
 	}
 
-	cleanups.push(func() {
-		if patch.patchedPath != "" {
-			os.Remove(patch.patchedPath)
+	if err := runDeviceDecrypt(cfg, cleanups, encPath, appBundleID, appVersion, outLocal); err != nil {
+		return
+	}
+}
+
+type offlineOutcome int
+
+const (
+	offlineDone offlineOutcome = iota
+	offlineNeedsDevice
+	offlineFatal
+)
+
+// attemptOfflineDecrypt runs the no-device FairPlay decrypt into outLocal and
+// verifies it. It returns offlineDone when the output verifies, offlineFatal
+// for an error already surfaced to the user (e.g. a credential that belongs to
+// a different account), and offlineNeedsDevice when the arm64-only offline path
+// couldn't fully decrypt the app (a still-encrypted 32-bit slice, or an app it
+// can't parse) - the caller then decides whether to fall back to the device.
+// On any non-done outcome the partial output is removed so a fallback writes a
+// clean file.
+func attemptOfflineDecrypt(encPath string, credential []byte, outLocal string) offlineOutcome {
+	outFile, err := os.OpenFile(outLocal, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		tui.Err("open local: %v", err)
+		return offlineFatal
+	}
+
+	keep := false
+
+	defer func() {
+		outFile.Close()
+
+		if !keep {
+			os.Remove(outLocal)
 		}
-	})
+	}()
 
-	live.OK("patched Info.plist")
+	live := tui.NewLive()
+	live.Spin("decrypting %s", filepath.Base(encPath))
 
-	if patch.changed {
-		tui.OK("MinimumOSVersion %s → %s", patch.previousMinOS, probe.IOSVersion)
+	cw := &countingWriter{w: outFile, onTick: func(n int64) {
+		live.Message("writing IPA → %s", humanBytes(n))
+	}}
+
+	summary, err := fairplay.Decrypt(encPath, cw, credential, decryptSkipAppex)
+	if err != nil {
+		if strings.Contains(err.Error(), "does not decode this SINF") {
+			live.Fail("decrypt failed: %v", err)
+			tui.Info("this credential belongs to a different Apple account; sign in with the account that owns the app and re-run `ipadecrypt bootstrap --remint`")
+
+			return offlineFatal
+		}
+
+		// Offline couldn't decrypt this app at all; let the device try.
+		live.Fail("offline decrypt failed: %v", err)
+
+		return offlineNeedsDevice
 	}
 
-	if patch.deviceFamilyExpanded {
-		tui.OK("UIDeviceFamily %v → %v", patch.previousDeviceFamily, patch.newDeviceFamily)
+	if err := outFile.Sync(); err != nil {
+		live.Fail("sync local: %v", err)
+		return offlineFatal
 	}
 
-	if patch.watchStripped > 0 {
-		tui.OK("stripped %d Watch/ entries", patch.watchStripped)
+	live.OK("decrypted %d binary(s), %d page(s) (%s → %s)", summary.Binaries, summary.Pages, humanBytes(cw.n), outLocal)
+
+	if decryptVerbose {
+		tui.Info("output: %s", outLocal)
+	}
+
+	if decryptNoVerify {
+		keep = true
+		return offlineDone
+	}
+
+	compareSource := decryptExtraVerify
+
+	src := ""
+	if compareSource {
+		src = encPath
 	}
 
 	live = tui.NewLive()
-	live.Spin("preparing install plan")
-
-	plan, err := buildInstallPlan(dev, patch.uploadPath, appBundleID)
-	if err != nil {
-		switch {
-		case errors.Is(err, errAppinstNotFound):
-			live.Fail("appinst not found on device - run `ipadecrypt bootstrap`")
-		default:
-			live.Fail("prepare install: %v", err)
-		}
-
-		return
-	}
-
-	cleanups.push(func() {
-		if plan.stagingRemote != "" && !decryptNoCleanup {
-			dev.Remove(plan.stagingRemote)
-		}
-	})
-
-	if plan.bundlePath == "" {
-		live.Spin("preparing install")
+	if compareSource {
+		live.Spin("verifying Mach-Os (cryptid, zero-fill, source byte-compare)")
 	} else {
-		live.Spin("checking installed app at %s", plan.bundlePath)
+		live.Spin("verifying Mach-Os (cryptid, zero-fill)")
 	}
 
-	install, err := ensureInstalledBundle(dev, plan, patch.uploadPath, func(e installEvent) {
-		switch e {
-		case installHashIPA:
-			live.Spin("computing IPA checksum")
-		case installHashInstalled:
-			live.Spin("computing installed app checksum")
-		case installReadInstalledVersion:
-			live.Spin("reading installed app version")
-		case installReplaceInstalled:
-			live.Spin("installed app differs - replacing it")
-		case installUpload:
-			live.Spin("uploading IPA to device")
-		case installRunAppinst:
-			live.Spin("running appinst")
-		case installRescan:
-			live.Spin("locating installed app")
-		}
-	}, func(cur, total int64) {
-		live.Message("%s", transferProgressText("uploading IPA to device", cur, total))
-		live.Progress(cur, total)
-	})
+	res, err := pipeline.Verify(outLocal, src, decryptSkipAppex)
 	if err != nil {
-		live.Fail("install failed: %v", err)
-		return
+		live.Fail("verify failed: %v", err)
+		return offlineFatal
 	}
 
-	if install.reinstalled {
-		live.OK("reinstalled (%s => %s) → %s", install.previousVersion, appVersion, install.bundlePath)
-	} else if install.installed {
-		live.OK("installed → %s", install.bundlePath)
-	} else {
-		live.OK("already installed → %s", install.bundlePath)
+	if res.OK() {
+		live.OK("%s", verifyOKSummary(res, compareSource))
+
+		keep = true
+
+		return offlineDone
 	}
 
-	uninstall = decideUninstall(install.installed || install.reinstalled, decryptForceUninstall, decryptNoUninstall)
-	uninstallBundleID = appBundleID
-	uninstallBundlePath = install.bundlePath
+	// A failure whose only symptom is still-encrypted slices is the 32-bit
+	// (armv7) gap the arm64-only offline decryptor can't close - hand it to
+	// the device fallback.
+	if len(res.StillEncrypted) > 0 && len(res.AllZeroCrypt) == 0 && len(res.Mismatches) == 0 {
+		live.Fail("%d slice(s) still encrypted (32-bit; offline decrypt is arm64-only)", len(res.StillEncrypted))
 
-	runDecryptOnBundle(dev, cleanups, plan.helperPath, appBundleID, install.bundlePath, appVersion, encPath)
-}
+		for _, n := range res.StillEncrypted {
+			tui.Info("  %s still encrypted (cryptid != 0)", n)
+		}
 
-// decideUninstall picks the post-decrypt cleanup behavior. weInstalledIt
-// is true when this run put the bundle on the device (fresh install or
-// reinstall over a different version). force/no come from the flags.
-func decideUninstall(weInstalledIt, force, no bool) bool {
-	switch {
-	case force:
-		return true
-	case no:
-		return false
+		return offlineNeedsDevice
 	}
 
-	return weInstalledIt
+	live.Fail("verify failed: %s", verifyFailureSummary(res))
+
+	for _, n := range res.StillEncrypted {
+		tui.Info("  %s still encrypted (cryptid != 0)", n)
+	}
+
+	for _, n := range res.AllZeroCrypt {
+		tui.Info("  %s crypt region all zeros", n)
+	}
+
+	for _, m := range res.Mismatches {
+		tui.Info("  %s %s", m.Name, m.Reason)
+	}
+
+	return offlineFatal
 }
 
 func verifyOKSummary(res pipeline.VerifyResult, compareSource bool) string {
@@ -616,162 +530,6 @@ func verifyFailureSummary(res pipeline.VerifyResult) string {
 	}
 
 	return strings.Join(parts, ", ")
-}
-
-// runDecryptOnBundle runs helper → pull → verify → cleanup on an
-// installed bundle. stagingRemote may be "" for the use-installed path.
-// srcIPAPath is the source IPA on the host when one exists (App Store
-// download / cache hit / local --ipa); empty for the use-installed path
-// where the source lives on-device only. Used by --extra-verify.
-func runDecryptOnBundle(dev *device.Client, cleanups *cleanupStack, helperPath, bundleID, bundlePath, version, srcIPAPath string) {
-	outLocal, err := localOutputPath(decryptOutput, bundleID, version)
-	if err != nil {
-		tui.Err("output path: %v", err)
-		return
-	}
-
-	if err := os.MkdirAll(filepath.Dir(outLocal), 0o755); err != nil {
-		tui.Err("mkdir local: %v", err)
-		return
-	}
-
-	outFile, err := os.OpenFile(outLocal, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-	if err != nil {
-		tui.Err("open local: %v", err)
-		return
-	}
-
-	// Best-effort: drop the partially-written IPA on any error return.
-	// Cleared after we commit on success.
-	abandonLocal := true
-
-	cleanups.push(func() {
-		outFile.Close()
-
-		if abandonLocal {
-			os.Remove(outLocal)
-		}
-	})
-
-	live := tui.NewLive()
-	live.Spin("starting helper")
-
-	progress := &helperProgress{}
-	onEvent := func(ev device.Event) {
-		update := progress.HandleEvent(ev)
-
-		if update.note != "" {
-			live.Note("%s", update.note)
-		}
-
-		if update.spin != "" {
-			live.Spin("%s", update.spin)
-		}
-
-		if update.progress {
-			if update.progressText != "" {
-				live.Message("%s", update.progressText)
-			}
-
-			live.Progress(update.progressCur, update.progressMax)
-		}
-	}
-
-	cw := &countingWriter{w: outFile, onTick: func(n int64) {
-		live.Message("writing IPA → %s", humanBytes(n))
-	}}
-
-	if srcIPAPath != "" {
-		// Host-side assembly: helper streams decrypted Mach-Os on stdout,
-		// host fuses them with the (unpatched) source IPA into outFile.
-		// No zip on device; output uses the original Info.plist as-is.
-		assembleErr := pipeline.Assemble(srcIPAPath, cw, func(write pipeline.SubstituteWriter) error {
-			code, err := dev.RunHelperExecs(helperPath, bundleID, bundlePath, decryptVerbose, decryptSkipAppex, onEvent, func(name string, _ int64, r io.Reader) error {
-				return write(name, r)
-			})
-			if err != nil {
-				return fmt.Errorf("helper run: %w", err)
-			}
-
-			if code != 0 {
-				return fmt.Errorf("helper exit %d", code)
-			}
-
-			return nil
-		})
-		if assembleErr != nil {
-			live.Fail("assemble: %v", assembleErr)
-			return
-		}
-	} else {
-		// Use-installed path: no source IPA on host, helper packages the
-		// IPA on device and streams its bytes straight into outFile.
-		code, err := dev.RunHelper(helperPath, bundleID, bundlePath, decryptVerbose, decryptSkipAppex, onEvent, cw)
-		if err != nil {
-			live.Fail("helper run: %v", err)
-			return
-		}
-
-		if code != 0 {
-			live.Fail("helper exit %d", code)
-			return
-		}
-	}
-
-	if err := outFile.Sync(); err != nil {
-		live.Fail("sync local: %v", err)
-		return
-	}
-
-	live.OK("%s (%s → %s)", progress.Summary(), humanBytes(cw.n), outLocal)
-
-	abandonLocal = false
-
-	if !decryptNoVerify {
-		if decryptExtraVerify && srcIPAPath == "" {
-			tui.Info("extra-verify unavailable when source ipa is not present")
-		}
-
-		compareSource := decryptExtraVerify && srcIPAPath != ""
-
-		src := ""
-		if compareSource {
-			src = srcIPAPath
-		}
-
-		live = tui.NewLive()
-		if compareSource {
-			live.Spin("verifying Mach-Os (cryptid, zero-fill, source byte-compare)")
-		} else {
-			live.Spin("verifying Mach-Os (cryptid, zero-fill)")
-		}
-
-		res, err := pipeline.Verify(outLocal, src, decryptSkipAppex)
-		if err != nil {
-			live.Fail("verify failed: %v", err)
-			return
-		}
-
-		if !res.OK() {
-			live.Fail("verify failed: %s", verifyFailureSummary(res))
-
-			for _, n := range res.StillEncrypted {
-				tui.Info("  %s still encrypted (cryptid != 0)", n)
-			}
-
-			for _, n := range res.AllZeroCrypt {
-				tui.Info("  %s crypt region all zeros", n)
-			}
-
-			for _, m := range res.Mismatches {
-				tui.Info("  %s %s", m.Name, m.Reason)
-			}
-
-			return
-		}
-
-		live.OK("%s", verifyOKSummary(res, compareSource))
-	}
 }
 
 func lookupTargetApp(as *appstore.Client, acc *appstore.Account, target decryptTarget) (appstore.App, error) {
@@ -837,168 +595,6 @@ func fetchRemoteEncryptedSource(cfg *config.Config, paths *config.Paths, as *app
 	}, nil
 }
 
-func patchSourceForDevice(encPath, iosVersion string, deviceFamily int, patchDeviceType bool) (patchResult, error) {
-	pattern := strings.TrimSuffix(filepath.Base(encPath), ".ipa") + "-patched-*.ipa"
-
-	f, err := os.CreateTemp("", pattern)
-	if err != nil {
-		return patchResult{}, fmt.Errorf("create temp ipa: %w", err)
-	}
-
-	tmp := f.Name()
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
-		return patchResult{}, fmt.Errorf("close temp ipa: %w", err)
-	}
-
-	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return patchResult{}, fmt.Errorf("prepare temp ipa: %w", err)
-	}
-
-	res, err := pipeline.PatchForInstall(encPath, tmp, iosVersion, deviceFamily, patchDeviceType)
-	if err != nil {
-		os.Remove(tmp)
-		return patchResult{}, err
-	}
-
-	if !res.MinOSChanged && res.WatchRemoved == 0 && !res.DeviceFamilyExpanded {
-		os.Remove(tmp)
-		return patchResult{uploadPath: encPath}, nil
-	}
-
-	return patchResult{
-		uploadPath:           tmp,
-		patchedPath:          tmp,
-		changed:              res.MinOSChanged,
-		previousMinOS:        res.PreviousMinOS,
-		watchStripped:        res.WatchRemoved,
-		deviceFamilyExpanded: res.DeviceFamilyExpanded,
-		previousDeviceFamily: res.PreviousDeviceFamily,
-		newDeviceFamily:      res.NewDeviceFamily,
-	}, nil
-}
-
-func buildInstallPlan(dev *device.Client, uploadPath, bundleID string) (installPlan, error) {
-	helperPath, err := dev.EnsureHelper()
-	if err != nil {
-		return installPlan{}, fmt.Errorf("helper upload: %w", err)
-	}
-
-	appinstPath, err := dev.LocateAppinst()
-	if err != nil {
-		return installPlan{}, fmt.Errorf("locate appinst: %w", err)
-	}
-
-	if appinstPath == "" {
-		return installPlan{}, errAppinstNotFound
-	}
-
-	bundlePath, _, err := dev.FindInstalledByBundleID(bundleID)
-	if err != nil {
-		return installPlan{}, fmt.Errorf("scan installed: %w", err)
-	}
-
-	return installPlan{
-		helperPath:    helperPath,
-		appinstPath:   appinstPath,
-		bundleID:      bundleID,
-		bundlePath:    bundlePath,
-		stagingRemote: path.Join(device.RemoteRoot, "staging", filepath.Base(uploadPath)),
-	}, nil
-}
-
-func ensureInstalledBundle(dev *device.Client, plan installPlan, uploadPath string, onEvent func(installEvent), onProgress func(cur, total int64)) (installResult, error) {
-	notify := func(e installEvent) {
-		if onEvent != nil {
-			onEvent(e)
-		}
-	}
-
-	if plan.bundlePath == "" {
-		return installUploadedBundle(dev, plan, uploadPath, false, "", notify, onProgress)
-	}
-
-	if !decryptFromAppStore {
-		notify(installHashIPA)
-
-		execName, wantSum, err := pipeline.MainExecSHA256(uploadPath)
-		if err != nil {
-			return installResult{}, fmt.Errorf("hash ipa: %w", err)
-		}
-
-		remoteExec := path.Join(plan.bundlePath, execName)
-
-		notify(installHashInstalled)
-
-		gotSum, err := dev.HashFile(remoteExec)
-		if err != nil {
-			return installResult{}, fmt.Errorf("hash device: %w", err)
-		}
-
-		if gotSum == wantSum {
-			return installResult{
-				bundlePath: plan.bundlePath,
-			}, nil
-		}
-	}
-
-	notify(installReadInstalledVersion)
-
-	previousVersion, err := dev.InstalledVersion(plan.bundlePath)
-	if err != nil {
-		previousVersion = ""
-	}
-
-	notify(installReplaceInstalled)
-
-	return installUploadedBundle(dev, plan, uploadPath, true, previousVersion, notify, onProgress)
-}
-
-func installUploadedBundle(dev *device.Client, plan installPlan, uploadPath string, reinstalled bool, previousVersion string, notify func(installEvent), onProgress func(cur, total int64)) (installResult, error) {
-	notify(installUpload)
-
-	src, err := os.Open(uploadPath)
-	if err != nil {
-		return installResult{}, fmt.Errorf("open %s: %w", uploadPath, err)
-	}
-
-	defer src.Close()
-
-	st, err := src.Stat()
-	if err != nil {
-		return installResult{}, fmt.Errorf("stat %s: %w", uploadPath, err)
-	}
-
-	pr := newProgressReader(src, st.Size(), onProgress)
-	if err := dev.Upload(pr, plan.stagingRemote, 0); err != nil {
-		return installResult{}, fmt.Errorf("upload: %w", err)
-	}
-
-	notify(installRunAppinst)
-
-	if err := dev.Install(plan.appinstPath, plan.stagingRemote); err != nil {
-		return installResult{}, fmt.Errorf("install: %w", err)
-	}
-
-	notify(installRescan)
-
-	bundlePath, _, err := dev.FindInstalledByBundleID(plan.bundleID)
-	if err != nil {
-		return installResult{}, fmt.Errorf("post-install scan: %w", err)
-	}
-
-	if bundlePath == "" {
-		return installResult{}, errors.New("install reported success but bundle not found")
-	}
-
-	return installResult{
-		bundlePath:      bundlePath,
-		installed:       true,
-		reinstalled:     reinstalled,
-		previousVersion: previousVersion,
-	}, nil
-}
-
 func localOutputPath(override, bundleID, version string) (string, error) {
 	defaultName := fmt.Sprintf("%s_%s.decrypted.ipa", bundleID, version)
 
@@ -1053,102 +649,4 @@ func (c *cleanupStack) run() {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
-}
-
-// HandleEvent renders one helper event into a TUI update. The helper
-// embeds a human-readable `msg` attribute on every event, so this
-// function mostly just relays msg as the note, with per-event spinner
-// updates and counters layered on top.
-func (p *helperProgress) HandleEvent(ev device.Event) helperUpdate {
-	upd := helperUpdate{note: ev.Attr("msg")}
-
-	switch ev.Name {
-	// Spinner-only events: progress indicator, no note line.
-	case "bundle.begin":
-		upd.note = ""
-		upd.spin = fmt.Sprintf("decrypting %s", path.Base(ev.Attr("src")))
-	case "dyld.resuming":
-		upd.note = ""
-		upd.spin = "running target"
-	case "image.begin":
-		upd.note = ""
-		upd.spin = fmt.Sprintf("decrypting %s", ev.Attr("name"))
-	case "pack.begin":
-		upd.note = ""
-
-		ipa := ev.Attr("ipa")
-		if ipa == "-" {
-			upd.spin = "packaging IPA → stdout"
-		} else {
-			upd.spin = fmt.Sprintf("packaging IPA → %s", path.Base(ipa))
-		}
-
-	// Counters + spinner update on each successful dump.
-	case "image.done":
-		p.dumpedTotal.Add(1)
-
-		switch ev.Attr("kind") {
-		case "main":
-			p.dumpedMain.Add(1)
-		case "framework":
-			p.dumpedFrameworks.Add(1)
-		default:
-			p.dumpedOther.Add(1)
-		}
-
-		upd.spin = fmt.Sprintf("decrypted %d image(s)", p.dumpedTotal.Load())
-
-	// Suppress empty-result bundle.done so the TUI stays quiet on appex
-	// passes that produce no extras.
-	case "bundle.done":
-		if ev.Attr("extras") == "0" {
-			upd.note = ""
-		}
-
-	// Trap on the benign dyld halt brk is silent  the helper catches it
-	// on purpose so the address space stays readable; nothing to surface.
-	case "dyld.trapped":
-		if ev.Attr("exception") == "EXC_BREAKPOINT" {
-			upd.note = ""
-		}
-
-	// Pure diagnostics that show up only in --verbose runs.
-	case "target.csflags",
-		"patch.scan_skipped", "patch.skipped", "patch.dyld_base_diff",
-		"dyld.settled", "dyld.fault_skip", "dyld.pac_stripped",
-		"staging.begin", "done":
-		upd.note = ""
-	}
-
-	// Catch-all for unknown event names: fall back to msg attr (already
-	// set above). If a future event lacks msg, render attrs verbatim so
-	// nothing is silently lost.
-	if upd.note == "" && upd.spin == "" && ev.Attr("msg") == "" {
-		parts := []string{"event=" + ev.Name}
-		for k, v := range ev.Attrs {
-			if k == "event" || k == "level" {
-				continue
-			}
-
-			parts = append(parts, fmt.Sprintf("%s=%q", k, v))
-		}
-
-		upd.note = strings.Join(parts, " ")
-	}
-
-	return upd
-}
-
-func (p *helperProgress) Summary() string {
-	total := p.dumpedTotal.Load()
-	main := p.dumpedMain.Load()
-	frameworks := p.dumpedFrameworks.Load()
-	other := p.dumpedOther.Load()
-
-	summary := fmt.Sprintf("decrypted %d image(s): %d main, %d framework", total, main, frameworks)
-	if other > 0 {
-		summary += fmt.Sprintf(", %d other", other)
-	}
-
-	return summary
 }

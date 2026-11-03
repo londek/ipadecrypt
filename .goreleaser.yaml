@@ -6,8 +6,6 @@ project_name: ipadecrypt
 before:
   hooks:
     - go mod tidy
-    - ./helper/build.sh
-    - cp helper/dist/ipadecrypt-helper-arm64 internal/device/ipadecrypt-helper-arm64
 
 builds:
   - id: ipadecrypt
@@ -22,7 +20,6 @@ builds:
     goarch:
       - arm64
       - amd64
-      - "386"
     flags:
       - -trimpath
     ldflags:
@@ -34,9 +31,6 @@ archives:
 
 checksum:
   name_template: checksums.txt
-  extra_files:
-    - glob: helper/dist/ipadecrypt-helper-arm64
-      name_template: ipadecrypt-helper-arm64
 
 snapshot:
   version_template: "{{ incpatch .Version }}-dev"
@@ -55,6 +49,3 @@ release:
   # Owner/name auto-detected from CI environment (GITHUB_REPOSITORY).
   draft: false
   prerelease: auto
-  extra_files:
-    - glob: helper/dist/ipadecrypt-helper-arm64
-      name_template: ipadecrypt-helper-arm64

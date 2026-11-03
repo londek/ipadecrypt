@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/londek/ipadecrypt/internal/appstore"
 	"github.com/londek/ipadecrypt/internal/config"
@@ -70,6 +71,14 @@ func accountWithStorefront(cfg *config.Config, flag string) (*appstore.Account, 
 	sf, err := appstore.ResolveStorefront(flag)
 	if err != nil {
 		return nil, err
+	}
+
+	// Keep the account's precise storefront (e.g. "143444-2,34") when the flag
+	// names the same one; only replace it for a genuinely different storefront.
+	// The attested download path sends X-Apple-Store-Front, so the full value
+	// must survive the override.
+	if acc.StoreFront == sf || strings.HasPrefix(acc.StoreFront, sf+"-") {
+		return acc, nil
 	}
 
 	acc.StoreFront = sf

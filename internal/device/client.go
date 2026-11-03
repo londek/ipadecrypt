@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"strconv"
@@ -19,19 +20,49 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-const RemoteRoot = "/var/mobile/Media/ipadecrypt"
+const (
+	RemoteRoot = "/var/mobile/Media/ipadecrypt"
+
+	defaultUSBPort = 2222
+)
 
 var ErrSudoPasswordRejected = errors.New("sudo password rejected")
 
 type Client struct {
-	cfg  config.Device
-	ssh  *ssh.Client
-	sftp *sftp.Client
+	cfg    config.Device
+	ssh    *ssh.Client
+	sftp   *sftp.Client
+	tunnel *exec.Cmd
 }
 
+// Connect opens an SSH+SFTP session to the device. When dev.USB is set the
+// connection is tunnelled over USB with iproxy (UDID selects the device);
+// otherwise it is a plain network connection to Host:Port.
 func Connect(ctx context.Context, dev config.Device) (*Client, error) {
+	host := dev.Host
+	port := dev.Port
+
+	c := &Client{cfg: dev}
+
+	if dev.USB {
+		if port == 0 {
+			port = defaultUSBPort
+		}
+
+		if err := c.startTunnel(dev.UDID, port); err != nil {
+			return nil, err
+		}
+
+		host = "127.0.0.1"
+	}
+
+	if port == 0 {
+		port = 22
+	}
+
 	auth, err := sshAuthMethods(dev.Auth)
 	if err != nil {
+		c.closeTunnel()
 		return nil, err
 	}
 
@@ -42,33 +73,96 @@ func Connect(ctx context.Context, dev config.Device) (*Client, error) {
 		Timeout:         15 * time.Second,
 	}
 
-	addr := net.JoinHostPort(dev.Host, strconv.Itoa(dev.Port))
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	dialer := &net.Dialer{Timeout: 15 * time.Second}
 
 	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
+		c.closeTunnel()
 		return nil, fmt.Errorf("dial %s: %w", addr, err)
 	}
 
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
 	if err != nil {
 		conn.Close()
+		c.closeTunnel()
+
 		return nil, fmt.Errorf("ssh handshake: %w", err)
 	}
 
-	sshClient := ssh.NewClient(sshConn, chans, reqs)
+	c.ssh = ssh.NewClient(sshConn, chans, reqs)
 
-	sftpClient, err := sftp.NewClient(sshClient,
+	sftpClient, err := sftp.NewClient(c.ssh,
 		sftp.UseConcurrentReads(true),
 		sftp.UseConcurrentWrites(true),
 		sftp.MaxConcurrentRequestsPerFile(64),
 	)
 	if err != nil {
-		sshClient.Close()
+		c.ssh.Close()
+		c.closeTunnel()
+
 		return nil, fmt.Errorf("sftp open: %w", err)
 	}
 
-	return &Client{cfg: dev, ssh: sshClient, sftp: sftpClient}, nil
+	c.sftp = sftpClient
+
+	return c, nil
+}
+
+// startTunnel forwards a local port to the device's SSH port over USB with
+// iproxy. It no-ops if something already listens on the port (a tunnel the
+// user started by hand).
+func (c *Client) startTunnel(udid string, port int) error {
+	if conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), time.Second); err == nil {
+		conn.Close()
+		return nil
+	}
+
+	iproxy, err := exec.LookPath("iproxy")
+	if err != nil {
+		return errors.New("USB mode needs iproxy on PATH (libimobiledevice); install it or use a network connection")
+	}
+
+	args := []string{fmt.Sprintf("%d:22", port)}
+	if udid != "" {
+		args = append(args, "-u", udid)
+	}
+
+	cmd := exec.Command(iproxy, args...)
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start iproxy: %w", err)
+	}
+
+	c.tunnel = cmd
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
+			return errors.New("USB SSH tunnel exited before opening")
+		}
+
+		if conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), time.Second); err == nil {
+			conn.Close()
+			return nil
+		}
+
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	c.closeTunnel()
+
+	return errors.New("USB SSH tunnel did not open")
+}
+
+func (c *Client) closeTunnel() {
+	if c.tunnel != nil && c.tunnel.Process != nil {
+		c.tunnel.Process.Kill()
+		c.tunnel.Wait()
+		c.tunnel = nil
+	}
 }
 
 func sshAuthMethods(a config.DeviceAuth) ([]ssh.AuthMethod, error) {

@@ -45,7 +45,7 @@ func versionsHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	upd := updater.Start(context.Background(), Version, cfg)
+	upd := updater.Start(context.Background(), resolveVersion(), cfg)
 	defer upd.Wait()
 
 	target, err := parseVersionsArg(args[0])

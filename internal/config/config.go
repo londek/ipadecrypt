@@ -63,13 +63,17 @@ func (a *Apple) SetAccount(acc *appstore.Account) {
 	a.Pod = acc.Pod
 }
 
+// Device describes the one-time jailbroken device used to mint the
+// per-account FairPlay credential. Minting needs root SSH. When USB is
+// set the connection is tunnelled over USB with iproxy (UDID selects the
+// device); otherwise it is a plain network SSH connection to Host:Port.
 type Device struct {
-	Host             string     `json:"host,omitempty"`
-	Port             int        `json:"port,omitempty"`
-	User             string     `json:"user,omitempty"`
-	Auth             DeviceAuth `json:"auth,omitempty"`
-	KnownHostsPath   string     `json:"knownHostsPath,omitempty"`
-	AcceptNewHostKey bool       `json:"acceptNewHostKey,omitempty"`
+	Host string     `json:"host,omitempty"`
+	Port int        `json:"port,omitempty"`
+	User string     `json:"user,omitempty"`
+	Auth DeviceAuth `json:"auth,omitempty"`
+	UDID string     `json:"udid,omitempty"`
+	USB  bool       `json:"usb,omitempty"`
 }
 
 type DeviceAuth struct {

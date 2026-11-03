@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	apphttp "github.com/londek/ipadecrypt/internal/apphttp"
 	"howett.net/plist"
 )
 
@@ -25,29 +26,27 @@ var (
 	dictXMLPattern     = regexp.MustCompile(`(?is)<dict\b[^>]*>.*</dict>`)
 )
 
-// send makes an HTTP request, persists cookies, and decodes the response into
-// out (when non-nil) per format. The returned *http.Response has an already-
-// drained body - callers inspect StatusCode/Header only.
-func (c *Client) send(method, url string, headers map[string]string, body []byte, format responseFormat, out any) (*http.Response, error) {
-	var r io.Reader
-	if len(body) > 0 {
-		r = bytes.NewReader(body)
+// send issues an App Store request through the emulated AppleMediaServices
+// backend under the given operation label, persists cookies, and decodes the
+// response into out (when non-nil) per format. The AMS guest builds and attests
+// the final request from the parameter map (an *apphttp.XMLPayload) or raw
+// bytes; signer, when set, provides the SAP signature used for authenticate.
+func (c *Client) send(op, method, url string, headers map[string]string, payload apphttp.Payload, signer apphttp.ActionSigner, format responseFormat, out any) (*http.Response, error) {
+	req := apphttp.Request{
+		Method:         method,
+		URL:            url,
+		Headers:        headers,
+		Payload:        payload,
+		ActionSigner:   signer,
+		ResponseFormat: apphttpFormat(format),
 	}
 
-	req, err := http.NewRequest(method, url, r)
-	if err != nil {
-		return nil, err
+	var raw []byte
+	if rp, ok := payload.(*apphttp.RawPayload); ok {
+		raw = rp.Content
 	}
 
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-
-	if req.Header.Get("User-Agent") == "" {
-		req.Header.Set("User-Agent", defaultUserAgent)
-	}
-
-	res, err := c.http.Do(req)
+	res, err := c.backend.Client(op).Send(req, raw)
 	if err != nil {
 		return nil, err
 	}
@@ -58,7 +57,7 @@ func (c *Client) send(method, url string, headers map[string]string, body []byte
 	}
 
 	if res.StatusCode == http.StatusTooManyRequests {
-		return res, fmt.Errorf("rate limited by Apple (HTTP %d): %s", res.StatusCode, strings.TrimSpace(string(body)))
+		return res, fmt.Errorf("rate limited by Apple (HTTP %d)", res.StatusCode)
 	}
 
 	if out == nil {
@@ -69,6 +68,10 @@ func (c *Client) send(method, url string, headers map[string]string, body []byte
 	data, err := io.ReadAll(res.Body)
 	if err != nil {
 		return nil, err
+	}
+
+	if debugEnabled() && debugDumpURL(url) {
+		debugf("%s -> status=%d body=%s", url, res.StatusCode, truncateBody(data, 1500))
 	}
 
 	switch format {
@@ -91,13 +94,12 @@ func (c *Client) send(method, url string, headers map[string]string, body []byte
 	return res, nil
 }
 
-func plistBody(content map[string]any) ([]byte, error) {
-	buf := new(bytes.Buffer)
-	if err := plist.NewEncoder(buf).Encode(content); err != nil {
-		return nil, fmt.Errorf("encode plist: %w", err)
+func apphttpFormat(f responseFormat) apphttp.ResponseFormat {
+	if f == formatJSON {
+		return apphttp.ResponseFormatJSON
 	}
 
-	return buf.Bytes(), nil
+	return apphttp.ResponseFormatXML
 }
 
 // normalizePlist unwraps Apple's various plist embeddings. Responses sometimes

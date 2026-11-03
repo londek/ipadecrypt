@@ -34,15 +34,16 @@ func (r VerifyResult) OK() bool {
 
 // Verify scans every Mach-O in the decrypted output IPA, asserting
 // cryptid==0 and that the FairPlay crypt region isn't a zero-fill (a
-// signal that helper decrypt-on-fault never actually fired). When
+// signal that decryption produced no plaintext). When
 // sourceIPA is non-empty, each output is also byte-compared against
 // its source slice outside the cryptid byte and the encrypted region,
 // catching cryptid-zeroed-without-decrypting and any out-of-band byte
 // corruption. When skipAppex is true, entries under Payload/<App>.app
-// /PlugIns/ are ignored - the helper left them encrypted on purpose.
+// /PlugIns/ are ignored - decryption left them encrypted on purpose.
 //
-// Output is THIN - helper drops fat siblings - so each output entry
-// maps to one specific slice in a (possibly fat) source.
+// The offline decryptor rewrites binaries in place, so each output entry is
+// byte-identical to its source counterpart except within the encrypted
+// arm64 slice.
 func Verify(outputIPA, sourceIPA string, skipAppex bool) (VerifyResult, error) {
 	var res VerifyResult
 
@@ -139,22 +140,33 @@ func Verify(outputIPA, sourceIPA string, skipAppex bool) (VerifyResult, error) {
 	return res, nil
 }
 
+// cryptZeroed reports whether any encrypted arm64 slice's crypt region is an
+// all-zero fill - the signal that decryption produced no plaintext. Handles
+// both thin and fat (in-place) output.
 func cryptZeroed(data []byte) bool {
-	if len(data) < 4 {
+	slices, err := macho.FatSlices(data)
+	if err != nil {
 		return false
 	}
 
-	m := binary.LittleEndian.Uint32(data[:4])
-	if m != macho.MagicLE && m != macho.Magic64LE {
-		return false
+	for _, s := range slices {
+		slice := data[s.Offset : s.Offset+s.Size]
+
+		info, err := macho.ReadEncryptionInfo(slice)
+		if err != nil || info.CryptSize == 0 {
+			continue
+		}
+
+		if s.Offset+info.CryptOff+info.CryptSize > uint64(len(data)) {
+			continue
+		}
+
+		if isAllZero(slice[info.CryptOff : info.CryptOff+info.CryptSize]) {
+			return true
+		}
 	}
 
-	info, err := macho.ReadEncryptionInfo(data)
-	if err != nil || info.CryptSize == 0 {
-		return false
-	}
-
-	return isAllZero(data[info.CryptOff : info.CryptOff+info.CryptSize])
+	return false
 }
 
 // readMachO returns the file's bytes if it begins with a Mach-O / fat magic.
@@ -180,100 +192,91 @@ func readMachO(f *zip.File) ([]byte, bool, error) {
 }
 
 // compareMachOSlice returns "" when the output is consistent with the
-// source. Two cases:
-//   - Output fat → helper didn't touch (no FairPlay slice); must match
-//     source verbatim.
-//   - Output thin → helper decrypted one slice and dropped fat siblings;
-//     pick the matching cputype slice in source and byte-compare outside
-//     the encrypted region + cryptid byte.
+// source. The offline decryptor works in place inside the full (possibly
+// fat) file: only the encrypted arm64 slice's cryptid u32 and crypt region
+// change, everything else is byte-identical. So output and source must be
+// the same length and equal everywhere except, within the source's single
+// encrypted slice, the cryptid word (zeroed) and the crypt bytes (plaintext).
 func compareMachOSlice(outData, srcData []byte) string {
-	if len(outData) < 4 {
-		return "output too short"
+	if len(outData) != len(srcData) {
+		return fmt.Sprintf("size differs: output=%d source=%d", len(outData), len(srcData))
 	}
 
-	outMagic := binary.LittleEndian.Uint32(outData[:4])
-	outIsFat := outMagic == macho.FatMagic || outMagic == macho.FatCigam ||
-		outMagic == macho.FatMagic64 || outMagic == macho.FatCigam64
+	slices, err := macho.FatSlices(srcData)
+	if err != nil {
+		return "parse source: " + err.Error()
+	}
 
-	if outIsFat {
-		if !bytes.Equal(outData, srcData) {
-			return "fat passthrough differs from source"
+	var (
+		found    bool
+		sliceOff uint64
+		srcCrypt macho.EncryptionInfo
+	)
+
+	for _, s := range slices {
+		info, err := macho.ReadEncryptionInfo(srcData[s.Offset : s.Offset+s.Size])
+		if err != nil {
+			continue
 		}
 
-		return ""
+		if found {
+			return "source has more than one encrypted slice"
+		}
+
+		found = true
+		sliceOff = s.Offset
+		srcCrypt = info
 	}
 
-	outCpu, outSub, err := macho.ReadThinCpu(outData)
-	if err != nil {
-		return "parse output cpu: " + err.Error()
-	}
-
-	srcSlice, err := macho.PickSlice(srcData, outCpu, outSub)
-	if err != nil {
-		return "match source slice: " + err.Error()
-	}
-
-	outCrypt, err := macho.ReadEncryptionInfo(outData)
-	if err != nil {
-		// No LC_ENCRYPTION_INFO in output - slice was never encrypted.
-		// Direct compare without the cryptid/cryptoff skip.
-		if bytes.Equal(outData, srcSlice) {
+	// No encrypted slice in source → nothing should have changed.
+	if !found {
+		if bytes.Equal(outData, srcData) {
 			return ""
 		}
 
-		return "thin passthrough differs from source slice"
+		return "output differs from unencrypted source"
 	}
 
-	srcCrypt, err := macho.ReadEncryptionInfo(srcSlice)
-	if err != nil {
-		return "parse source LC_ENCRYPTION_INFO: " + err.Error()
+	cryptidAbs := sliceOff + srcCrypt.CryptidOffset
+	cryptStart := sliceOff + srcCrypt.CryptOff
+	cryptEnd := cryptStart + srcCrypt.CryptSize
+
+	if cryptEnd > uint64(len(outData)) {
+		return "crypt region exceeds file"
 	}
 
-	// Helper only patches cryptid and decrypts bytes - never moves
-	// cryptoff or cryptsize.
-	if outCrypt.CryptOff != srcCrypt.CryptOff ||
-		outCrypt.CryptSize != srcCrypt.CryptSize {
-		return fmt.Sprintf(
-			"cryptoff/cryptsize moved: output=(%d,%d) source=(%d,%d)",
-			outCrypt.CryptOff, outCrypt.CryptSize,
-			srcCrypt.CryptOff, srcCrypt.CryptSize,
-		)
+	if !bytes.Equal(outData[:cryptidAbs], srcData[:cryptidAbs]) {
+		return "bytes before cryptid differ"
 	}
 
-	if len(outData) != len(srcSlice) {
-		return fmt.Sprintf("size differs: output=%d source=%d", len(outData), len(srcSlice))
+	if binary.LittleEndian.Uint32(outData[cryptidAbs:cryptidAbs+4]) != 0 {
+		return "cryptid not zeroed"
 	}
 
-	cryptidEnd := outCrypt.CryptidOffset + 4
-	cryptEnd := outCrypt.CryptOff + outCrypt.CryptSize
-
-	if !bytes.Equal(outData[:outCrypt.CryptidOffset], srcSlice[:outCrypt.CryptidOffset]) {
-		return "header diff before cryptid"
+	if !bytes.Equal(outData[cryptidAbs+4:cryptStart], srcData[cryptidAbs+4:cryptStart]) {
+		return "load-commands between cryptid and cryptoff differ"
 	}
 
-	if !bytes.Equal(outData[cryptidEnd:outCrypt.CryptOff], srcSlice[cryptidEnd:outCrypt.CryptOff]) {
-		return "header/load-commands diff between cryptid and cryptoff"
+	if !bytes.Equal(outData[cryptEnd:], srcData[cryptEnd:]) {
+		return "bytes after encrypted region differ (LINKEDIT/etc)"
 	}
 
-	if cryptEnd < uint64(len(outData)) &&
-		!bytes.Equal(outData[cryptEnd:], srcSlice[cryptEnd:]) {
-		return "diff after encrypted region (LINKEDIT/etc)"
-	}
+	outCrypt := outData[cryptStart:cryptEnd]
 
-	outCryptBytes := outData[outCrypt.CryptOff:cryptEnd]
-	srcCryptBytes := srcSlice[srcCrypt.CryptOff : srcCrypt.CryptOff+srcCrypt.CryptSize]
-
-	// Source already plaintext: bytes must match verbatim, and the
-	// "decrypt bailed" heuristics below would false-flag.
+	// Source already plaintext: bytes must match verbatim.
 	if srcCrypt.Cryptid == 0 {
-		return ""
+		if bytes.Equal(outCrypt, srcData[cryptStart:cryptEnd]) {
+			return ""
+		}
+
+		return "crypt region differs from already-plaintext source"
 	}
 
-	if isAllZero(outCryptBytes) {
-		return "crypt region is all zeros (FairPlay decrypt-on-fault never fired in target)"
+	if isAllZero(outCrypt) {
+		return "crypt region is all zeros (decrypt produced no plaintext)"
 	}
 
-	if bytes.Equal(outCryptBytes, srcCryptBytes) {
+	if bytes.Equal(outCrypt, srcData[cryptStart:cryptEnd]) {
 		return "crypt region byte-equal to source ciphertext (cryptid zeroed without decrypting)"
 	}
 

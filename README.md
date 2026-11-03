@@ -16,21 +16,36 @@
 
 </div>
 
+## How it works
+
+ipadecrypt decrypts FairPlay apps **on your computer** - no device in the loop
+for day-to-day use. A jailbroken device is needed exactly **once per Apple
+account**, during `bootstrap`, to mint a reusable 16-byte account credential.
+After that, downloading and decrypting any app for that account is fully
+offline.
+
+The offline decryptor handles **arm64** slices (everything the modern App Store
+ships). A few old builds still ship a **32-bit (armv7) slice** - those can't be
+decrypted offline, so ipadecrypt automatically falls back to decrypting them
+**on your jailbroken device** when one is configured (the same device used for
+minting). Pass `--no-on-device` to disable the fallback, or `--on-device` to go
+straight to the device.
+
 ## Requirements
 
 ### On your computer
-- Jailbroken iPhone reachable over the network
+- Nothing special for everyday (arm64) decrypting. A jailbroken iPhone reachable
+  over the network (or over USB with `iproxy`) is needed for the one-time mint,
+  and again only for the on-device fallback on old 32-bit apps.
 
 ### On the jailbroken iPhone
-All installable through Sileo:
-
-| Package | Purpose |
+| Requirement | Purpose |
 |---|---|
-| **OpenSSH** | SSH server - ipadecrypt drives the device over SSH |
-| **AppSync Unified** | Bypasses installd's signature check (add repo `https://lukezgd.github.io/repo`) |
-| **appinst** | Installs modified IPAs on the device (add repo `https://lukezgd.github.io/repo`) |
+| **OpenSSH with root access** | The mint and the on-device fallback connect over root SSH (install OpenSSH from Sileo) |
+| **≥1 owned App Store app installed** | Bought with the same Apple ID; used to trigger FairPlay once during the mint |
+| **AppSync Unified + `appinst`** | Only for the on-device fallback: installs the app on the device so it can be decrypted |
 
-> Tested on iOS 16.7.11 with palera1n rootless and Dopamine on iPhone 8 Plus. iOS 14 through 17 on A10–A14 devices are expected to work.
+> Tested on iOS 16.7.11 with palera1n rootless and Dopamine on iPhone 8 Plus. iOS 10+ is expected to work for minting; decryption itself runs anywhere.
 
 ## Install
 
@@ -58,18 +73,31 @@ go build ./cmd/ipadecrypt
 ipadecrypt bootstrap
 ```
 
-A four-step interactive wizard:
+A three-step interactive wizard:
 
-1. **App Store sign-in** - Logs into App Store. Credentials stay local in `~/.ipadecrypt/config.json`.
-2. **Device connect** - SSH host / user / password; probes iOS version + arch.
-3. **Prerequisites** - verifies whether deps are installed.
-4. **Helper install** - uploads helper binary and verifies whether it runs.
+1. **App Store sign-in** - Logs into the App Store. Credentials stay local in `~/.ipadecrypt/config.json`. The first sign-in downloads and caches the Apple frameworks the App Store engine emulates (~tens of MB, range-extracted from a pinned macOS image) under `~/.cache/ipadecrypt/`; later runs reuse the cache.
+2. **Credential mint** - Connects once to your jailbroken device over root SSH and extracts the reusable account credential, cached under `~/.ipadecrypt/credentials/`.
+3. **On-device fallback check** - Verifies the device is ready to decrypt old apps that still ship a 32-bit slice (AppSync Unified + `appinst` present, helper uploads and execs). Best-effort: a missing prerequisite only disables that fallback and is reported, not fatal.
+
+Run it again anytime; it skips minting if a credential is already cached (pass
+`--remint` to force). After bootstrap, decrypting modern (arm64) apps is fully
+offline - the device is only needed again for the on-device fallback on old
+32-bit apps.
 
 ### Decrypt an app
 
 ```sh
 ipadecrypt decrypt <bundle-id|app-store-id|app-store-url|path-to-local-ipa>
 ```
+
+This decrypts offline. If the app ships a 32-bit slice the offline path can't
+handle and a jailbroken device is configured, ipadecrypt automatically falls
+back to decrypting it on the device. Useful flags:
+
+- `--on-device` - skip the offline attempt and decrypt on the device directly.
+- `--no-on-device` - never touch the device; fail if offline can't fully decrypt.
+- `--patch-device-type` - expand `UIDeviceFamily` so an app built for a different device type still installs during the on-device fallback.
+- `--no-uninstall` / `--force-uninstall` - control whether the app is removed from the device after an on-device decrypt (default: removed only if this run installed it).
 
 ### List versions of an app
 
@@ -79,8 +107,10 @@ ipadecrypt versions <bundle-id|app-store-id|app-store-url>
 
 ## Known issues
 
-- [New, unsupported SC_Info format is shipped with some apps, ipadecrypt will fail to decrypt them.](https://github.com/londek/ipadecrypt/issues/34)
-- Due to arm64e PPL guards on A12+, some apps such as Apple's are not expected to work.
+- Only the supported SINF/SUPF license formats decrypt offline; apps shipping a newer, unsupported `SC_Info` format fall back to the on-device path when a device is configured.
+- The credential is per Apple account: decrypting an app requires signing in with (and having minted from) the account that owns it.
+- Old builds that still ship a 32-bit (armv7) slice can't be decrypted offline (the offline decryptor is arm64-only) - they need the on-device fallback, so a jailbroken device must be configured.
+- Minting is known to fail on **iOS 12.5.7 / A8** (e.g. iPhone 6) with `IOKit function is not mapped at the same address in fairplayd`. This is in the upstream [fairplay-decrypt](https://github.com/EthanArbuckle/fairplay-decrypt) device code and is tracked upstream.
 
 ## License
 
@@ -88,19 +118,19 @@ MIT.
 
 ## Prior art
 
+- [EthanArbuckle/fairplay-decrypt](https://github.com/EthanArbuckle/fairplay-decrypt) - the offline FairPlay decryptor and credential-minting approach this release is a Go port of.
 - [majd/ipatool](https://github.com/majd/ipatool) - the Apple Configurator impersonation the App Store client is based on.
 - [34306/TrollDecryptJB](https://github.com/34306/TrollDecryptJB) - `task_for_pid` + `mach_vm_read` from a suspended spawn, entitlement set.
-- [akemin-dayo/AppSync](https://github.com/akemin-dayo/AppSync) - installd signature-bypass tweak + `appinst`.
 - [JohnCoates/flexdecrypt](https://github.com/JohnCoates/flexdecrypt) - the pre-iOS-16 approach that stopped working and prompted the pivot.
 
 ## AI Disclaimer
 
 This project was developed with the assistance of AI tools. While I can't guarantee the accuracy of all AI-generated content, I have overviewed creation process and then reviewed, tested the code to ensure it meets the project's requirements.
 
-<a href="https://www.star-history.com/?repos=londek%2Fipadecrypt&type=date&legend=top-left">
+<a href="https://star-history.dera.page/#londek/ipadecrypt&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=londek/ipadecrypt&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=londek/ipadecrypt&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=londek/ipadecrypt&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=londek/ipadecrypt&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=londek/ipadecrypt&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=londek/ipadecrypt&type=date&legend=top-left" />
  </picture>
 </a>

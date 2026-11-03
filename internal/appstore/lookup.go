@@ -27,7 +27,7 @@ func (c *Client) LookupByBundleID(acc *Account, bundleID string) (App, error) {
 
 	var out lookupResult
 
-	res, err := c.send(http.MethodGet, u, nil, nil, formatJSON, &out)
+	res, err := c.send("request", http.MethodGet, u, nil, nil, nil, formatJSON, &out)
 	if err != nil {
 		return App{}, fmt.Errorf("lookup: %w", err)
 	}
@@ -60,7 +60,7 @@ func (c *Client) LookupByAppID(acc *Account, appID string) (App, error) {
 
 	var out lookupResult
 
-	res, err := c.send(http.MethodGet, u, nil, nil, formatJSON, &out)
+	res, err := c.send("request", http.MethodGet, u, nil, nil, nil, formatJSON, &out)
 	if err != nil {
 		return App{}, fmt.Errorf("lookup: %w", err)
 	}

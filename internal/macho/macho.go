@@ -22,10 +22,6 @@ const (
 
 	LCEncryptionInfo   = 0x21
 	LCEncryptionInfo64 = 0x2c
-
-	// CPU_SUBTYPE_MASK is the feature-bits mask on cpusubtype; the slice-
-	// selection match ignores these bits.
-	cpuSubtypeFeatureMask uint32 = 0x00ffffff
 )
 
 // IsMagic reports whether b starts with any thin or fat Mach-O magic.
@@ -140,50 +136,103 @@ func SliceHasCryptid(data []byte) (bool, error) {
 	return false, errors.New("not mach-o")
 }
 
-// ReadThinCpu returns the cputype and cpusubtype of a thin LE Mach-O.
-func ReadThinCpu(data []byte) (cpu, sub uint32, err error) {
+// Slice describes one architecture slice's location within a Mach-O. For a
+// thin Mach-O the single slice spans the whole file.
+type Slice struct {
+	Cpu    uint32
+	Sub    uint32
+	Offset uint64
+	Size   uint64
+}
+
+// FatSlices returns the architecture slices of a thin or fat Mach-O. A thin
+// Mach-O yields one slice covering the whole file.
+func FatSlices(data []byte) ([]Slice, error) {
+	if len(data) < 4 {
+		return nil, errors.New("too short")
+	}
+
+	magic := binary.LittleEndian.Uint32(data[:4])
+	switch magic {
+	case MagicLE, Magic64LE, MagicBE, Magic64BE:
+		cpu, sub, err := readAnyThinCpu(data)
+		if err != nil {
+			return nil, err
+		}
+
+		return []Slice{{Cpu: cpu, Sub: sub, Offset: 0, Size: uint64(len(data))}}, nil
+	case FatMagic, FatCigam:
+		return fatSlices(data, false)
+	case FatMagic64, FatCigam64:
+		return fatSlices(data, true)
+	}
+
+	return nil, fmt.Errorf("not Mach-O magic=0x%x", magic)
+}
+
+func readAnyThinCpu(data []byte) (cpu, sub uint32, err error) {
 	if len(data) < 16 {
 		return 0, 0, errors.New("mach_header truncated")
 	}
 
-	bo := binary.LittleEndian
+	magic := binary.LittleEndian.Uint32(data[0:4])
 
-	magic := bo.Uint32(data[0:4])
-	if magic != MagicLE && magic != Magic64LE {
-		return 0, 0, fmt.Errorf("not a thin LE Mach-O magic=0x%x", magic)
+	bo := binary.ByteOrder(binary.LittleEndian)
+	if magic == MagicBE || magic == Magic64BE {
+		bo = binary.BigEndian
 	}
 
 	return bo.Uint32(data[4:8]), bo.Uint32(data[8:12]), nil
 }
 
-// PickSlice returns the slice of data whose (cputype, cpusubtype) matches.
-// For a thin Mach-O the whole file is returned when it matches. cpusubtype
-// is compared modulo the feature bits.
-func PickSlice(data []byte, cpu, sub uint32) ([]byte, error) {
-	if len(data) < 4 {
-		return nil, errors.New("source too short")
+func fatSlices(data []byte, is64 bool) ([]Slice, error) {
+	bo := binary.BigEndian
+
+	if len(data) < 8 {
+		return nil, errors.New("fat header truncated")
 	}
 
-	magic := binary.LittleEndian.Uint32(data[:4])
-	switch magic {
-	case MagicLE, Magic64LE:
-		c, s, err := ReadThinCpu(data)
-		if err != nil {
-			return nil, err
-		}
-
-		if c == cpu && (s&cpuSubtypeFeatureMask) == (sub&cpuSubtypeFeatureMask) {
-			return data, nil
-		}
-
-		return nil, fmt.Errorf("source cpu mismatch: have (0x%x,0x%x) want (0x%x,0x%x)", c, s, cpu, sub)
-	case FatMagic, FatCigam:
-		return pickFatSlice(data, false, cpu, sub)
-	case FatMagic64, FatCigam64:
-		return pickFatSlice(data, true, cpu, sub)
+	nfat := bo.Uint32(data[4:8])
+	if nfat == 0 || nfat > 32 {
+		return nil, fmt.Errorf("implausible nfat_arch=%d", nfat)
 	}
 
-	return nil, fmt.Errorf("source not Mach-O magic=0x%x", magic)
+	archSize := 20
+	if is64 {
+		archSize = 32
+	}
+
+	out := make([]Slice, 0, nfat)
+
+	off := 8
+	for range nfat {
+		if off+archSize > len(data) {
+			return nil, errors.New("fat_arch truncated")
+		}
+
+		var s Slice
+
+		s.Cpu = bo.Uint32(data[off : off+4])
+		s.Sub = bo.Uint32(data[off+4 : off+8])
+
+		if is64 {
+			s.Offset = bo.Uint64(data[off+8 : off+16])
+			s.Size = bo.Uint64(data[off+16 : off+24])
+		} else {
+			s.Offset = uint64(bo.Uint32(data[off+8 : off+12]))
+			s.Size = uint64(bo.Uint32(data[off+12 : off+16]))
+		}
+
+		off += archSize
+
+		if s.Offset+s.Size > uint64(len(data)) {
+			return nil, errors.New("fat slice out of range")
+		}
+
+		out = append(out, s)
+	}
+
+	return out, nil
 }
 
 func checkFat(data []byte, is64 bool) (bool, error) {
@@ -300,53 +349,4 @@ func checkThin(data []byte, swap bool) (bool, error) {
 	}
 
 	return false, nil
-}
-
-func pickFatSlice(data []byte, is64 bool, cpu, sub uint32) ([]byte, error) {
-	bo := binary.BigEndian
-
-	if len(data) < 8 {
-		return nil, errors.New("fat truncated")
-	}
-
-	nfat := bo.Uint32(data[4:8])
-	if nfat == 0 || nfat > 32 {
-		return nil, fmt.Errorf("implausible nfat_arch=%d", nfat)
-	}
-
-	archSize := 20
-	if is64 {
-		archSize = 32
-	}
-
-	off := 8
-	for range nfat {
-		if off+archSize > len(data) {
-			return nil, errors.New("fat_arch truncated")
-		}
-
-		cputype := bo.Uint32(data[off : off+4])
-		cpusubtype := bo.Uint32(data[off+4 : off+8])
-
-		var sliceOff, sliceSize uint64
-		if is64 {
-			sliceOff = bo.Uint64(data[off+8 : off+16])
-			sliceSize = bo.Uint64(data[off+16 : off+24])
-		} else {
-			sliceOff = uint64(bo.Uint32(data[off+8 : off+12]))
-			sliceSize = uint64(bo.Uint32(data[off+12 : off+16]))
-		}
-
-		off += archSize
-
-		if cputype == cpu && (cpusubtype&cpuSubtypeFeatureMask) == (sub&cpuSubtypeFeatureMask) {
-			if sliceOff+sliceSize > uint64(len(data)) {
-				return nil, errors.New("fat slice out of range")
-			}
-
-			return data[sliceOff : sliceOff+sliceSize], nil
-		}
-	}
-
-	return nil, fmt.Errorf("no fat slice matched cputype=0x%x cpusubtype=0x%x", cpu, sub)
 }

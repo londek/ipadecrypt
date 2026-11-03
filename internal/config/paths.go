@@ -63,6 +63,36 @@ func (p *Paths) VersionsCacheFile(bundleID string) (string, error) {
 	return filepath.Join(versionsDir, bundleID+".json"), nil
 }
 
+// CredentialPath returns the on-disk path of the cached 16-byte FairPlay
+// credential for the given account DSID. The DSID is sanitized to a bare
+// token so it can never escape the credentials directory.
+func (p *Paths) CredentialPath(dsid string) (string, error) {
+	token := sanitizeDSID(dsid)
+	if token == "" {
+		return "", fmt.Errorf("invalid account identifier %q", dsid)
+	}
+
+	dir, err := p.ensure(filepath.Join(p.Root, "credentials"))
+	if err != nil {
+		return "", err
+	}
+
+	return filepath.Join(dir, token+".bin"), nil
+}
+
+func sanitizeDSID(dsid string) string {
+	var b []byte
+
+	for i := 0; i < len(dsid); i++ {
+		c := dsid[i]
+		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-' || c == '_' {
+			b = append(b, c)
+		}
+	}
+
+	return string(b)
+}
+
 func (p *Paths) VersionsLog() (string, error) {
 	logDir, err := p.ensure(filepath.Join(p.Root, "logs"))
 	if err != nil {
