@@ -1,5 +1,8 @@
 *.ipa
 *.exe
+.idea
+.fleet
+.vscode
 .claude
 dist/
 .grepai/

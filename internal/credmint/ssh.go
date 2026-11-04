@@ -38,6 +38,7 @@ type sshDevice struct {
 	ps         string
 	dir        string
 	triggerDir string
+	freya      bool
 }
 
 func dial(ctx context.Context, dev config.Device) (*sshDevice, error) {

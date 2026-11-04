@@ -1,0 +1,88 @@
+diff --git a/credential/credential.c b/credential/credential.c
+--- a/credential/credential.c
++++ b/credential/credential.c
+@@ -8,6 +8,8 @@
+ #include <CoreFoundation/CoreFoundation.h>
+ #include <dlfcn.h>
+ #include <limits.h>
++#include <mach/bootstrap.h>
++#include <mach/ndr.h>
+ #include <mach/mach.h>
+ #include <mach/vm_map.h>
+ #include <mach/vm_region.h>
+@@ -1310,3 +1312,74 @@
++extern kern_return_t bootstrap_look_up(mach_port_t bootstrap, const char *name, mach_port_t *service);
++
++typedef struct {
++    mach_msg_header_t header;
++    NDR_record_t ndr;
++    uint8_t command;
++    uint8_t padding[3];
++    uint32_t argument;
++} FreyaPlatformizeRequest;
++
++typedef struct {
++    mach_msg_header_t header;
++    NDR_record_t ndr;
++    kern_return_t result;
++} FreyaPlatformizeReply;
++
++typedef union {
++    FreyaPlatformizeRequest request;
++    FreyaPlatformizeReply reply;
++    uint8_t storage[4096];
++} FreyaPlatformizeMessage;
++
++/* Freya exec does not grant helpers TF_PLATFORM; use its existing per-process
++   suckmyd RPC instead of changing global kernel policy. */
++static kern_return_t freya_platformize_self(void) {
++    mach_port_t service = MACH_PORT_NULL;
++    mach_port_t reply = MACH_PORT_NULL;
++    kern_return_t status = bootstrap_look_up(bootstrap_port, "suckmyd", &service);
++    if (status != KERN_SUCCESS) {
++        return status;
++    }
++
++    status = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &reply);
++    if (status == KERN_SUCCESS) {
++        FreyaPlatformizeMessage message = {0};
++        message.request.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE);
++        message.request.header.msgh_size = sizeof(message.request);
++        message.request.header.msgh_remote_port = service;
++        message.request.header.msgh_local_port = reply;
++        message.request.header.msgh_id = 500;
++        message.request.ndr = NDR_record;
++        message.request.command = 1;
++        message.request.argument = (uint32_t)getpid();
++
++        status = mach_msg(&message.request.header, MACH_SEND_MSG | MACH_RCV_MSG,
++                          sizeof(message.request), sizeof(message), reply, 5000, MACH_PORT_NULL);
++        if (status == KERN_SUCCESS) {
++            if (message.reply.header.msgh_size < sizeof(message.reply)) {
++                status = KERN_FAILURE;
++            } else {
++                status = message.reply.result;
++            }
++        }
++    }
++
++    if (reply != MACH_PORT_NULL) {
++        mach_port_deallocate(mach_task_self(), reply);
++    }
++
++    mach_port_deallocate(mach_task_self(), service);
++    return status;
++}
++
+ int main(int argc, char **argv) {
++    if (getenv("IPADECRYPT_FREYA_PLATFORMIZE") != NULL) {
++        kern_return_t status = freya_platformize_self();
++        if (status != KERN_SUCCESS) {
++            fprintf(stderr, "Freya per-process platformization failed: %#x\n", status);
++            return 1;
++        }
++    }
++
+     int status = -1;
+     if (argc >= 2 && !strcmp(argv[1], "retrieve")) {
+         status = run_retrieve(argc, argv);
