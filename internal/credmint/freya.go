@@ -35,6 +35,7 @@ func (d *sshDevice) prepareFreya() error {
 	}
 
 	d.freya = true
+
 	return nil
 }
 
