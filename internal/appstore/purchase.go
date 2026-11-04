@@ -15,12 +15,12 @@ type purchaseResult struct {
 	Status          int    `plist:"status,omitempty"`
 }
 
-// Purchase acquires a license for the given free app on the signed-in account.
+// Purchase acquires a license for the given app on the signed-in account.
 // Tries the App Store pricing family first, falls back to Arcade.
 func (c *Client) Purchase(acc *Account, app App) error {
-	if app.Price > 0 {
-		return ErrPaidAppNotOwned
-	}
+	// if app.Price > 0 {
+		// return ErrPaidAppNotOwned
+	// }
 
 	g, err := guid()
 	if err != nil {
