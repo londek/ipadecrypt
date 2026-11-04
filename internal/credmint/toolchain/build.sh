@@ -42,6 +42,21 @@ if [ ! -f "$src/Makefile" ]; then
     exit 1
 fi
 
+# --- stage a writable copy and apply local patches -------------------------
+# The pinned fairplay-decrypt tree is patched with ipadecrypt-specific fixes
+# (toolchain/*.patch) before building. Stage a copy so both the pinned clone
+# and a caller-supplied source tree are patched the same way; git apply is
+# used because the image has no patch(1) and it fails loudly if a hunk no
+# longer applies to the pinned sources.
+staged="$(mktemp -d)"
+cp -a "$src/." "$staged/"
+for p in "$here"/*.patch; do
+    [ -e "$p" ] || continue
+    echo "==> applying $(basename "$p")"
+    (cd "$staged" && git apply --check "$p" && git apply "$p")
+done
+src="$staged"
+
 # --- toolchain image ------------------------------------------------------
 IMAGE="${IPADECRYPT_CREDMINT_IMAGE:-ghcr.io/londek/ipadecrypt-credmint-toolchain:latest}"
 if [ "$IMAGE" = "build" ]; then
@@ -92,6 +107,7 @@ docker run --rm --platform linux/amd64 \
     '
 
 [ -n "$cleanup" ] && rm -rf "$cleanup"
+rm -rf "$staged"
 
 # --- sanity: no placeholders left -----------------------------------------
 for f in credential.ios driver.ios trigger.ios; do

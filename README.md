@@ -110,7 +110,6 @@ ipadecrypt versions <bundle-id|app-store-id|app-store-url>
 - Only the supported SINF/SUPF license formats decrypt offline; apps shipping a newer, unsupported `SC_Info` format fall back to the on-device path when a device is configured.
 - The credential is per Apple account: decrypting an app requires signing in with (and having minted from) the account that owns it.
 - Old builds that still ship a 32-bit (armv7) slice can't be decrypted offline (the offline decryptor is arm64-only) - they need the on-device fallback, so a jailbroken device must be configured.
-- Minting is known to fail on **iOS 12.5.7 / A8** (e.g. iPhone 6) with `IOKit function is not mapped at the same address in fairplayd`. This is in the upstream [fairplay-decrypt](https://github.com/EthanArbuckle/fairplay-decrypt) device code and is tracked upstream.
 
 ## License
 

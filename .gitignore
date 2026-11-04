@@ -1,4 +1,7 @@
 *.ipa
+.idea
+.fleet
+.vscode
 .claude
 dist/
 .grepai/

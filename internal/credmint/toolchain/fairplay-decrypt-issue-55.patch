@@ -1,0 +1,23 @@
+diff --git a/credential/observer.c b/credential/observer.c
+index 0cfac38..97a4357 100644
+--- a/credential/observer.c
++++ b/credential/observer.c
+@@ -227,11 +227,15 @@ int observe_fairplay_requests(pid_t pid, uint32_t selector, SelectorReturnCallba
+     }
+ 
+     void *symbol = dlsym(RTLD_DEFAULT, "IOConnectCallStructMethod");
++    if (!symbol) {
++        fprintf(stderr, "IOConnectCallStructMethod not found locally\n");
++        goto end;
++    }
++
+     uint8_t remote[16];
+     vm_size_t got = 0;
+-    if (!symbol || vm_read_overwrite(observer->task, (vm_address_t)(uintptr_t)symbol, sizeof(remote), (vm_address_t)(uintptr_t)remote, &got) != KERN_SUCCESS || got != sizeof(remote) || memcmp(remote, symbol, sizeof(remote))) {
+-        fprintf(stderr, "IOKit function is not mapped at the same address in fairplayd\n");
+-        goto end;
++    if (vm_read_overwrite(observer->task, (vm_address_t)(uintptr_t)symbol, sizeof(remote), (vm_address_t)(uintptr_t)remote, &got) != KERN_SUCCESS || got != sizeof(remote) || memcmp(remote, symbol, sizeof(remote))) {
++        fprintf(stderr, "warning: IOKit function is not mapped at the same address in fairplayd; using local address\n");
+     }
+ 
+     observer->call_address = (uint64_t)(uintptr_t)symbol;
