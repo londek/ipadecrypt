@@ -51,6 +51,10 @@ func Mint(ctx context.Context, dev config.Device) ([]byte, error) {
 		}
 	}
 
+	if err := d.prepareFreya(); err != nil {
+		return nil, err
+	}
+
 	program, err := d.path("credential.ios")
 	if err != nil {
 		return nil, err
@@ -105,7 +109,7 @@ func Mint(ctx context.Context, dev config.Device) ([]byte, error) {
 	}
 
 	retrieve := strings.Join([]string{
-		shellQuote(program), "retrieve",
+		d.credentialCommand(program), "retrieve",
 		shellQuote(licensePath), shellQuote(uidLayerPath), shellQuote(credentialPath),
 	}, " ")
 	if _, err := d.run(retrieve, nil); err != nil {
@@ -130,7 +134,7 @@ func verifyDevice(d *sshDevice, program, udid string) error {
 		return err
 	}
 
-	if _, err := d.run(shellQuote(program)+" device-udid "+shellQuote(actualPath), nil); err != nil {
+	if _, err := d.run(d.credentialCommand(program)+" device-udid "+shellQuote(actualPath), nil); err != nil {
 		return fmt.Errorf("read device identity: %w", err)
 	}
 
@@ -288,7 +292,7 @@ func stopRemote(d *sshDevice, executable string) {
 // observe_uid_layer, including the exit-code-3 direct-launch fallback.
 func observeUIDLayer(d *sshDevice, program string, pid int, output, triggerProgram, executable string) (err error) {
 	command := strings.Join([]string{
-		shellQuote(program), "observe-uid-layer",
+		d.credentialCommand(program), "observe-uid-layer",
 		strconv.Itoa(pid), shellQuote(output), "90",
 	}, " ")
 
