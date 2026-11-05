@@ -246,12 +246,14 @@ func (c *Client) EnsureHelper() (string, error) {
 	remote := path.Join(RemoteRoot, "helpers",
 		fmt.Sprintf("ipadecrypt-helper-arm64-%s.bin", hex.EncodeToString(sum[:])[:12]))
 
-	if c.Exists(remote) {
-		return remote, nil
+	if !c.Exists(remote) {
+		if err := c.Upload(bytes.NewReader(helperArm64), remote, 0o755); err != nil {
+			return "", fmt.Errorf("upload helper: %w", err)
+		}
 	}
 
-	if err := c.Upload(bytes.NewReader(helperArm64), remote, 0o755); err != nil {
-		return "", fmt.Errorf("upload helper: %w", err)
+	if err := c.prepareFreyaHelper(remote); err != nil {
+		return "", err
 	}
 
 	return remote, nil
