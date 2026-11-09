@@ -7,6 +7,7 @@ package credmint
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"path"
@@ -28,7 +29,7 @@ var fairplaydRe = regexp.MustCompile(`^fairplayd(?:\.[AH][0-9]+)?$`)
 // credential retriever, and returns the 16-byte account credential. The
 // device must be signed into the same Apple account and have at least one
 // owned App Store app installed.
-func Mint(ctx context.Context, dev config.Device) ([]byte, error) {
+func Mint(ctx context.Context, dev config.Device, dsid string) ([]byte, error) {
 	files, err := bundleFiles()
 	if err != nil {
 		return nil, err
@@ -64,7 +65,15 @@ func Mint(ctx context.Context, dev config.Device) ([]byte, error) {
 		return nil, err
 	}
 
-	installedApp, executable, installedSinf, err := triggerApp(d)
+	var accountFilter []byte
+	if dsid != "" {
+		if v, err := strconv.ParseUint(dsid, 10, 64); err == nil {
+			accountFilter = make([]byte, 4)
+			binary.BigEndian.PutUint32(accountFilter, uint32(v))
+		}
+	}
+
+	installedApp, executable, installedSinf, err := triggerApp(d, accountFilter)
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +171,7 @@ func verifyDevice(d *sshDevice, program, udid string) error {
 // triggerApp finds the first installed App Store app with a supported license
 // and returns its bundle path, main executable name, and license bytes.
 // Mirrors retrieve.py trigger_app with no account filter.
-func triggerApp(d *sshDevice) (bundle, executable string, sinf []byte, err error) {
+func triggerApp(d *sshDevice, accountFilter []byte) (bundle, executable string, sinf []byte, err error) {
 	listing, err := d.run("find /var/containers/Bundle/Application -type f -path '*/SC_Info/*.sinf' -print0", nil)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("scan installed apps: %w", err)
@@ -180,6 +189,9 @@ func triggerApp(d *sshDevice) (bundle, executable string, sinf []byte, err error
 
 	sort.Slice(paths, func(i, j int) bool { return bytes.Compare(paths[i], paths[j]) < 0 })
 
+	var fallbackBundle, fallbackExec string
+	var fallbackSinf []byte
+
 	for _, raw := range paths {
 		sinfPath := string(raw)
 		appBundle := path.Dir(path.Dir(sinfPath))
@@ -191,6 +203,13 @@ func triggerApp(d *sshDevice) (bundle, executable string, sinf []byte, err error
 		installedSinf, err := d.readFile(sinfPath)
 		if err != nil || len(installedSinf) > maxSinfBytes || !supportedSinf(installedSinf) {
 			continue
+		}
+
+		if len(accountFilter) == 4 {
+			user, err := sinfField(installedSinf, "user")
+			if err != nil || !bytes.Equal(user, accountFilter) {
+				continue
+			}
 		}
 
 		infoData, err := d.readFile(appBundle + "/Info.plist")
@@ -208,7 +227,24 @@ func triggerApp(d *sshDevice) (bundle, executable string, sinf []byte, err error
 			continue
 		}
 
+		if strings.Contains(exec, " ") {
+			if fallbackBundle == "" {
+				fallbackBundle = appBundle
+				fallbackExec = exec
+				fallbackSinf = installedSinf
+			}
+			continue
+		}
+
 		return appBundle, exec, installedSinf, nil
+	}
+
+	if fallbackBundle != "" {
+		return fallbackBundle, fallbackExec, fallbackSinf, nil
+	}
+
+	if len(accountFilter) == 4 {
+		return "", "", nil, errors.New("no installed App Store app has a supported license for this Apple ID; please install an app from the App Store using this Apple ID and retry")
 	}
 
 	return "", "", nil, errors.New("no installed App Store app has a supported license; install an app bought with this Apple ID and retry")

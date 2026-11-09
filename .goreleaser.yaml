@@ -46,8 +46,6 @@ changelog:
       - "Merge pull request"
 
 release:
-  github:
-    owner: londek
-    name: ipadecrypt
-  draft: true
+  # Owner/name auto-detected from CI environment (GITHUB_REPOSITORY).
+  draft: false
   prerelease: auto

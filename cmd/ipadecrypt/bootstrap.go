@@ -92,7 +92,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 		live := tui.NewLive()
 		live.Spin("minting credential (one-time)")
 
-		credential, err := credmint.Mint(context.Background(), cfg.Device)
+		credential, err := credmint.Mint(context.Background(), cfg.Device, dsid)
 		if err != nil {
 			if errors.Is(err, credmint.ErrBinariesUnavailable) {
 				live.Fail("this build cannot mint credentials")

@@ -1,4 +1,5 @@
 *.ipa
+*.exe
 .idea
 .fleet
 .vscode
@@ -6,6 +7,7 @@
 dist/
 .grepai/
 .DS_Store
+ipatool-sessions/
 
 # Vendored reference clones (untracked research sources)
 fairplay-decrypt/

@@ -1,6 +1,12 @@
 name: Release
 
 on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 1.2.3). Leave empty to use tag name.'
+        required: false
+        type: string
   push:
     tags: ['v*']
 
@@ -20,6 +26,13 @@ jobs:
       - name: fetch tags
         run: git fetch --force --tags
 
+      - name: create tag from workflow_dispatch input
+        if: inputs.version != ''
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git tag -a "v${{ inputs.version }}" -m "Release v${{ inputs.version }}"
+
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
@@ -31,10 +44,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: goreleaser/goreleaser-action@v6
+      - name: goreleaser release
+        uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
           version: '~> v2'
-          args: release --clean
+          args: release --clean ${{ github.event_name == 'workflow_dispatch' && inputs.version == '' && '--snapshot' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: upload snapshot artifacts
+        if: github.event_name == 'workflow_dispatch' && inputs.version == ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipadecrypt-snapshot-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: ignore
