@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
+	"strings"
 
 	apphttp "github.com/londek/ipadecrypt/internal/apphttp"
 )
@@ -13,6 +15,30 @@ type purchaseResult struct {
 	CustomerMessage string `plist:"customerMessage,omitempty"`
 	JingleDocType   string `plist:"jingleDocType,omitempty"`
 	Status          int    `plist:"status,omitempty"`
+
+	// Dialog is the server message Apple shows instead of completing the
+	// purchase (e.g. the app is unavailable in the account's region).
+	Dialog struct {
+		Message     string `plist:"message,omitempty"`
+		Explanation string `plist:"explanation,omitempty"`
+	} `plist:"dialog,omitempty"`
+}
+
+// failure describes a failed purchase in Apple's own wording when present.
+func (r purchaseResult) failure() error {
+	var parts []string
+
+	for _, s := range []string{r.CustomerMessage, r.Dialog.Message, r.Dialog.Explanation} {
+		if s = strings.TrimSpace(s); s != "" && !slices.Contains(parts, s) {
+			parts = append(parts, s)
+		}
+	}
+
+	if len(parts) == 0 {
+		return errors.New("purchase failed")
+	}
+
+	return errors.New(strings.Join(parts, ": "))
 }
 
 // Purchase acquires a license for the given app on the signed-in account.
@@ -39,6 +65,7 @@ func (c *Client) purchaseWithParams(acc *Account, app App, g, params string) err
 	url := fmt.Sprintf("https://%s%s%s", podPrefix, storeDomain, purchasePath)
 	headers := map[string]string{
 		"Content-Type":        "application/x-apple-plist",
+		"User-Agent":          storeUserAgent,
 		"iCloud-DSID":         acc.DirectoryServicesID,
 		"X-Dsid":              acc.DirectoryServicesID,
 		"X-Apple-Store-Front": acc.StoreFront,
@@ -79,14 +106,12 @@ func (c *Client) purchaseWithParams(acc *Account, app App, g, params string) err
 		return ErrPasswordTokenExpired
 	case out.FailureType == failureLicenseAlreadyExists:
 		return ErrLicenseAlreadyExists
-	case out.FailureType != "" && out.CustomerMessage != "":
-		return errors.New(out.CustomerMessage)
 	case out.FailureType != "":
-		return errors.New("purchase failed")
+		return out.failure()
 	case res.StatusCode == http.StatusInternalServerError:
 		return ErrLicenseAlreadyExists
 	case out.JingleDocType != "purchaseSuccess" || out.Status != 0:
-		return errors.New("purchase failed")
+		return out.failure()
 	}
 
 	return nil

@@ -61,7 +61,8 @@ func acquireLicense(cfg *config.Config, as *appstore.Client, app appstore.App) e
 }
 
 // accountWithStorefront returns the configured Apple account, overriding the
-// storefront when flag is non-empty.
+// storefront when flag is non-empty. The override is recorded on cfg (never
+// saved), so every later cfg.Apple.Account() in this run uses it too.
 func accountWithStorefront(cfg *config.Config, flag string) (*appstore.Account, error) {
 	acc := cfg.Apple.Account()
 	if flag == "" {
@@ -81,9 +82,9 @@ func accountWithStorefront(cfg *config.Config, flag string) (*appstore.Account, 
 		return acc, nil
 	}
 
-	acc.StoreFront = sf
+	cfg.Apple.StoreFrontOverride = sf
 
-	return acc, nil
+	return cfg.Apple.Account(), nil
 }
 
 // withAuth runs fn with up to `retries` attempts, recovering from the two

@@ -41,15 +41,24 @@ type Apple struct {
 	DirectoryServicesIdentifier string `json:"directoryServicesIdentifier,omitempty"`
 	StoreFront                  string `json:"storeFront,omitempty"`
 	Pod                         string `json:"pod,omitempty"`
+
+	// StoreFrontOverride is a per-run --storefront value. It is never saved
+	// and survives SetAccount, so a mid-run re-login keeps the override.
+	StoreFrontOverride string `json:"-"`
 }
 
 func (a Apple) Account() *appstore.Account {
+	storeFront := a.StoreFront
+	if a.StoreFrontOverride != "" {
+		storeFront = a.StoreFrontOverride
+	}
+
 	return &appstore.Account{
 		Email:               a.Email,
 		Password:            a.Password,
 		PasswordToken:       a.PasswordToken,
 		DirectoryServicesID: a.DirectoryServicesIdentifier,
-		StoreFront:          a.StoreFront,
+		StoreFront:          storeFront,
 		Pod:                 a.Pod,
 	}
 }
