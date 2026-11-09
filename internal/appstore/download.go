@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	apphttp "github.com/londek/ipadecrypt/internal/apphttp"
 	"howett.net/plist"
 )
 
@@ -259,14 +258,16 @@ func (c *Client) postDownloadProduct(baseURL, versionKey string, acc *Account, a
 	}
 
 	headers := map[string]string{
-		"Content-Type": "application/x-apple-plist",
-		"iCloud-DSID":  acc.DirectoryServicesID,
-		"X-Dsid":       acc.DirectoryServicesID,
+		"Content-Type":        "application/x-apple-plist",
+		"iCloud-DSID":         acc.DirectoryServicesID,
+		"X-Apple-Store-Front": acc.StoreFront,
+		"X-Dsid":              acc.DirectoryServicesID,
+		"X-Token":             acc.PasswordToken,
 	}
 
 	var out downloadResult
 
-	res, err := c.send("request", http.MethodPost, fmt.Sprintf("%s?guid=%s", baseURL, g), headers, &apphttp.XMLPayload{Content: payload}, nil, formatXML, &out)
+	res, err := c.sendCommerce(fmt.Sprintf("%s?guid=%s", baseURL, g), g, headers, payload, &out)
 	if err != nil {
 		debugf("downloadProduct %s key=%s ver=%q: send error: %v", baseURL, versionKey, externalVersionID, err)
 		return downloadResult{}, 0, fmt.Errorf("download: %w", err)

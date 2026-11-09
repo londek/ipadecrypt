@@ -2,11 +2,16 @@ package appstore
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/londek/ipadecrypt/internal/store"
+	"github.com/londek/ipadecrypt/internal/storeauth"
 	cookiejar "github.com/juju/persistent-cookiejar"
 )
 
@@ -16,6 +21,14 @@ type Client struct {
 	backend             *store.Backend
 	actionSignerFactory ActionSignerFactory
 	kbsync              kbsyncStore
+
+	// Anisette (Apple device-identity) state, persisted next to the cookies.
+	// authMu guards it and authHeaders, which only live for one Login.
+	authHTTP      *http.Client
+	anisettePath  string
+	authMu        sync.Mutex
+	anisetteState []byte
+	authHeaders   http.Header
 }
 
 func New(cookiesFile string) (*Client, error) {
@@ -37,16 +50,37 @@ func New(cookiesFile string) (*Client, error) {
 	}
 
 	// Store API requests are built and attested by the emulated AppleMediaServices
-	// framework in the backend; the SAP signer (used for authenticate) runs its
-	// own setup/cert exchange through the backend's "api" executor.
+	// framework in the backend; the SAP signer (used for authenticate) sends its
+	// setup/cert exchange directly through the backend's "sap" executor.
 	backend := store.New(jar, macAddress)
 
 	return &Client{
 		jar:                 jar,
 		http:                hc,
 		backend:             backend,
-		actionSignerFactory: frameworkActionSignerFactory(backend.Client("api")),
+		actionSignerFactory: frameworkActionSignerFactory(backend.Client("sap")),
+		authHTTP:            storeauth.NewHTTPClient(jar),
+		anisettePath:        filepath.Join(filepath.Dir(cookiesFile), "anisette"),
 	}, nil
+}
+
+// loadAnisette reads the persisted Anisette state once; a missing file just
+// means the machine has not been provisioned yet. Callers hold authMu.
+func (c *Client) loadAnisette() {
+	if len(c.anisetteState) == 0 {
+		c.anisetteState, _ = os.ReadFile(c.anisettePath)
+	}
+}
+
+// saveAnisette persists the rotated Anisette state. Callers hold authMu.
+func (c *Client) saveAnisette(state []byte) error {
+	if err := os.WriteFile(c.anisettePath, state, 0o600); err != nil {
+		return fmt.Errorf("save Apple authentication state: %w", err)
+	}
+
+	c.anisetteState = state
+
+	return nil
 }
 
 // guid returns the Configurator-shaped GUID: uppercase MAC address, no colons.

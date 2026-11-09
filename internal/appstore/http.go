@@ -32,19 +32,27 @@ var (
 // the final request from the parameter map (an *apphttp.XMLPayload) or raw
 // bytes; signer, when set, provides the SAP signature used for authenticate.
 func (c *Client) send(op, method, url string, headers map[string]string, payload apphttp.Payload, signer apphttp.ActionSigner, format responseFormat, out any) (*http.Response, error) {
-	req := apphttp.Request{
-		Method:         method,
-		URL:            url,
-		Headers:        headers,
-		Payload:        payload,
-		ActionSigner:   signer,
-		ResponseFormat: apphttpFormat(format),
-	}
+	return c.sendRequest(op, apphttp.Request{
+		Method:       method,
+		URL:          url,
+		Headers:      headers,
+		Payload:      payload,
+		ActionSigner: signer,
+	}, format, out)
+}
+
+// sendRequest is send for callers that need request options send does not
+// expose, such as NoRedirects. On a decode failure it still returns the
+// response so its headers stay inspectable.
+func (c *Client) sendRequest(op string, req apphttp.Request, format responseFormat, out any) (*http.Response, error) {
+	req.ResponseFormat = apphttpFormat(format)
 
 	var raw []byte
-	if rp, ok := payload.(*apphttp.RawPayload); ok {
+	if rp, ok := req.Payload.(*apphttp.RawPayload); ok {
 		raw = rp.Content
 	}
+
+	url := req.URL
 
 	res, err := c.backend.Client(op).Send(req, raw)
 	if err != nil {
@@ -81,7 +89,7 @@ func (c *Client) send(op, method, url string, headers map[string]string, payload
 		}
 	case formatXML:
 		if _, err := plist.Unmarshal(normalizePlist(data), out); err != nil {
-			return nil, &ResponseDecodeError{
+			return res, &ResponseDecodeError{
 				Cause:       err,
 				StatusCode:  res.StatusCode,
 				ContentType: res.Header.Get("Content-Type"),

@@ -8,8 +8,17 @@ import (
 	"strings"
 )
 
+// bagResult accepts both bag layouts: endpoints wrapped in urlBag, and the
+// top-level keys the direct (ix=6) bag returns.
 type bagResult struct {
-	URLBag urlBag `plist:"urlBag,omitempty"`
+	URLBag               urlBag `plist:"urlBag,omitempty"`
+	AuthEndpoint         string `plist:"authenticateAccount,omitempty"`
+	EntDownloadEndpoint  string `plist:"volumeStoreDownloadProduct,omitempty"`
+	RedownloadEndpoint   string `plist:"redownloadProduct,omitempty"`
+	UpdateEndpoint       string `plist:"updateProduct,omitempty"`
+	SAPSetupEndpoint     string `plist:"sign-sap-setup,omitempty"`
+	SAPSetupCertEndpoint string `plist:"sign-sap-setup-cert,omitempty"`
+	SAPVersion           string `plist:"sign-sap-version,omitempty"`
 }
 
 type urlBag struct {
@@ -31,11 +40,14 @@ func (c *Client) fetchURLBag() (urlBag, error) {
 		return urlBag{}, err
 	}
 
-	bagURL := fmt.Sprintf("https://%s%s?guid=%s", initDomain, initPath, g)
+	bagURL := fmt.Sprintf("https://%s%s?ix=6&guid=%s", initDomain, initPath, g)
 
 	var out bagResult
 
-	res, err := c.send("bag", http.MethodGet, bagURL, map[string]string{"Accept": "application/xml"}, nil, nil, formatXML, &out)
+	res, err := c.send("bag-direct", http.MethodGet, bagURL, map[string]string{
+		"Accept":     "application/xml",
+		"User-Agent": storeUserAgent,
+	}, nil, nil, formatXML, &out)
 	if err != nil {
 		return urlBag{}, fmt.Errorf("bag: %w", err)
 	}
@@ -44,7 +56,19 @@ func (c *Client) fetchURLBag() (urlBag, error) {
 		return urlBag{}, fmt.Errorf("bag: status %d", res.StatusCode)
 	}
 
-	return out.URLBag, nil
+	if out.URLBag != (urlBag{}) {
+		return out.URLBag, nil
+	}
+
+	return urlBag{
+		AuthEndpoint:         out.AuthEndpoint,
+		EntDownloadEndpoint:  out.EntDownloadEndpoint,
+		RedownloadEndpoint:   out.RedownloadEndpoint,
+		UpdateEndpoint:       out.UpdateEndpoint,
+		SAPSetupEndpoint:     out.SAPSetupEndpoint,
+		SAPSetupCertEndpoint: out.SAPSetupCertEndpoint,
+		SAPVersion:           out.SAPVersion,
+	}, nil
 }
 
 // bag fetches the App Store bag.xml and returns the current SAP signing config:
@@ -78,9 +102,12 @@ func (c *Client) bag() (SAPConfig, error) {
 		return SAPConfig{}, fmt.Errorf("bag: parse authentication endpoint: %w", err)
 	}
 
-	// The bare path returns unusable responses (204/301/HTML); Apple only
-	// answers the signed authenticate request on the slashed path.
-	authEndpoint.Path = PrivateAppStoreAPIPathAuth + "/"
+	// The legacy bare MZFinance path returns unusable responses (204/301/HTML);
+	// Apple only answers it on the slashed path. The native endpoint keeps its own.
+	if strings.HasSuffix(strings.ToLower(authEndpoint.Hostname()), "buy."+iTunesDomain) {
+		authEndpoint.Path = PrivateAppStoreAPIPathAuth + "/"
+	}
+
 	config.AuthEndpoint = authEndpoint.String()
 
 	return config, nil
@@ -120,6 +147,15 @@ func validateAuthenticationEndpoint(endpoint string) error {
 	}
 
 	host := strings.ToLower(parsed.Hostname())
+	if host == PrivateAuthDomain {
+		switch parsed.Path {
+		case PrivateAuthPathNative, PrivateAuthPathNative + "/", PrivateAuthPathNative + "/fast", PrivateAuthPathNative + "/fast/":
+			return nil
+		}
+
+		return fmt.Errorf("unsupported authentication endpoint %q", endpoint)
+	}
+
 	if host != "buy."+iTunesDomain && !strings.HasSuffix(host, "-buy."+iTunesDomain) {
 		return fmt.Errorf("unsupported authentication endpoint %q", endpoint)
 	}

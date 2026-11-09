@@ -6,10 +6,13 @@ import (
 )
 
 func CountryCodeFromStoreFront(storeFront string) (string, error) {
-	for key, val := range storeFronts {
-		parts := strings.Split(storeFront, "-")
+	// Accepts "143441-1,29" (X-Set-Apple-Store-Front) and "143441,29"
+	// (X-Apple-Request-Store-Front) shapes.
+	identifier, _, _ := strings.Cut(strings.TrimSpace(storeFront), ",")
+	identifier, _, _ = strings.Cut(identifier, "-")
 
-		if len(parts) >= 1 && parts[0] == val {
+	for key, val := range storeFronts {
+		if identifier == val {
 			return key, nil
 		}
 	}
