@@ -47,7 +47,6 @@ func (c *Client) Purchase(acc *Account, app App) error {
 	// if app.Price > 0 {
 		// return ErrPaidAppNotOwned
 	// }
-
 	g, err := guid()
 	if err != nil {
 		return err

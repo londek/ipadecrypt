@@ -66,6 +66,7 @@ func Mint(ctx context.Context, dev config.Device, dsid string) ([]byte, error) {
 	}
 
 	var accountFilter []byte
+
 	if dsid != "" {
 		if v, err := strconv.ParseUint(dsid, 10, 64); err == nil {
 			accountFilter = make([]byte, 4)
@@ -189,8 +190,10 @@ func triggerApp(d *sshDevice, accountFilter []byte) (bundle, executable string, 
 
 	sort.Slice(paths, func(i, j int) bool { return bytes.Compare(paths[i], paths[j]) < 0 })
 
-	var fallbackBundle, fallbackExec string
-	var fallbackSinf []byte
+	var (
+		fallbackBundle, fallbackExec string
+		fallbackSinf                 []byte
+	)
 
 	for _, raw := range paths {
 		sinfPath := string(raw)
@@ -233,6 +236,7 @@ func triggerApp(d *sshDevice, accountFilter []byte) (bundle, executable string, 
 				fallbackExec = exec
 				fallbackSinf = installedSinf
 			}
+
 			continue
 		}
 
