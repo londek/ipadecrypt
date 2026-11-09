@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 const (
@@ -73,6 +74,13 @@ var requiredFiles = []fileSpec{
 	},
 }
 
+// loaded memoizes the verified bundle for the process; consumers clone the
+// image bytes before patching them, so sharing the slices is safe.
+var (
+	loadedMu sync.Mutex
+	loaded   *Bundle
+)
+
 // Load resolves and caches the pinned macOS framework profile used by SAP,
 // kbsync generation, and package decryption.
 func Load(ctx context.Context) (Bundle, error) {
@@ -84,6 +92,24 @@ func Load(ctx context.Context) (Bundle, error) {
 		return Bundle{}, fmt.Errorf("load Apple assets: %w", err)
 	}
 
+	loadedMu.Lock()
+	defer loadedMu.Unlock()
+
+	if loaded != nil {
+		return *loaded, nil
+	}
+
+	bundle, err := load(ctx)
+	if err != nil {
+		return Bundle{}, err
+	}
+
+	loaded = &bundle
+
+	return bundle, nil
+}
+
+func load(ctx context.Context) (Bundle, error) {
 	directory, err := cacheDirectory()
 	if err != nil {
 		return Bundle{}, err

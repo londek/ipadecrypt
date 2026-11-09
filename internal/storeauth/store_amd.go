@@ -25,7 +25,7 @@ func StoreAMDHeaders(ctx context.Context, encoded []byte, endpoint string, hardw
 	}
 
 	if len(state.Provisioning) == 0 {
-		return nil, nil, errors.New("store AMD state is not provisioned")
+		return nil, nil, ErrNotProvisioned
 	}
 
 	bundle, err := assets.Load(ctx)

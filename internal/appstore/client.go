@@ -15,6 +15,9 @@ import (
 	cookiejar "github.com/juju/persistent-cookiejar"
 )
 
+// AnisetteFile is the persisted Anisette state, kept next to the cookies file.
+const AnisetteFile = "anisette"
+
 type Client struct {
 	jar                 *cookiejar.Jar
 	http                *http.Client
@@ -22,13 +25,12 @@ type Client struct {
 	actionSignerFactory ActionSignerFactory
 	kbsync              kbsyncStore
 
-	// Anisette (Apple device-identity) state, persisted next to the cookies.
-	// authMu guards it and authHeaders, which only live for one Login.
+	// Anisette (Apple device-identity) state, persisted next to the cookies
+	// and guarded by authMu.
 	authHTTP      *http.Client
 	anisettePath  string
 	authMu        sync.Mutex
 	anisetteState []byte
-	authHeaders   http.Header
 }
 
 func New(cookiesFile string) (*Client, error) {
@@ -60,7 +62,7 @@ func New(cookiesFile string) (*Client, error) {
 		backend:             backend,
 		actionSignerFactory: frameworkActionSignerFactory(backend.Client("sap")),
 		authHTTP:            storeauth.NewHTTPClient(jar),
-		anisettePath:        filepath.Join(filepath.Dir(cookiesFile), "anisette"),
+		anisettePath:        filepath.Join(filepath.Dir(cookiesFile), AnisetteFile),
 	}, nil
 }
 
@@ -72,9 +74,16 @@ func (c *Client) loadAnisette() {
 	}
 }
 
-// saveAnisette persists the rotated Anisette state. Callers hold authMu.
+// saveAnisette persists the rotated Anisette state. It writes a temp file and
+// renames it so an interrupted save never leaves a truncated state behind.
+// Callers hold authMu.
 func (c *Client) saveAnisette(state []byte) error {
-	if err := os.WriteFile(c.anisettePath, state, 0o600); err != nil {
+	tmp := c.anisettePath + ".tmp"
+	if err := os.WriteFile(tmp, state, 0o600); err != nil {
+		return fmt.Errorf("save Apple authentication state: %w", err)
+	}
+
+	if err := os.Rename(tmp, c.anisettePath); err != nil {
 		return fmt.Errorf("save Apple authentication state: %w", err)
 	}
 

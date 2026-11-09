@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -32,6 +33,11 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 
 		if err := cfg.Save(); err != nil {
 			tui.Err("reset config: %v", err)
+			return
+		}
+
+		if err := os.Remove(filepath.Join(paths.Root, appstore.AnisetteFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			tui.Err("reset Apple authentication state: %v", err)
 			return
 		}
 	}

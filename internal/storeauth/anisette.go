@@ -30,6 +30,15 @@ const (
 	anisetteUserAgent  = "akd/1.0 CFNetwork/811.5.4 Darwin/16.7.0"
 )
 
+var (
+	// ErrInvalidState reports a persisted state that cannot be decoded, e.g.
+	// one truncated by an interrupted write. Callers start over from nil.
+	ErrInvalidState = errors.New("invalid persisted anisette state")
+
+	// ErrNotProvisioned reports a state without machine provisioning.
+	ErrNotProvisioned = errors.New("store AMD state is not provisioned")
+)
+
 type anisetteState struct {
 	Identifier, Provisioning []byte
 	RoutingInfo              uint64
@@ -209,7 +218,7 @@ func decodeAnisetteState(encoded []byte) (*anisetteState, error) {
 
 	var state anisetteState
 	if json.Unmarshal(encoded, &state) != nil || len(state.Identifier) != 16 || len(state.Provisioning) > anisetteLimit {
-		return nil, errors.New("invalid persisted anisette state")
+		return nil, ErrInvalidState
 	}
 
 	return &state, nil
