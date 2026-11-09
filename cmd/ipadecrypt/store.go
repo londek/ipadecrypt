@@ -61,7 +61,8 @@ func acquireLicense(cfg *config.Config, as *appstore.Client, app appstore.App) e
 }
 
 // accountWithStorefront returns the configured Apple account, overriding the
-// storefront when flag is non-empty.
+// storefront when flag is non-empty. The override is recorded on cfg (never
+// saved), so every later cfg.Apple.Account() in this run uses it too.
 func accountWithStorefront(cfg *config.Config, flag string) (*appstore.Account, error) {
 	acc := cfg.Apple.Account()
 	if flag == "" {
@@ -73,17 +74,24 @@ func accountWithStorefront(cfg *config.Config, flag string) (*appstore.Account, 
 		return nil, err
 	}
 
-	// Keep the account's precise storefront (e.g. "143444-2,34") when the flag
-	// names the same one; only replace it for a genuinely different storefront.
-	// The attested download path sends X-Apple-Store-Front, so the full value
-	// must survive the override.
-	if acc.StoreFront == sf || strings.HasPrefix(acc.StoreFront, sf+"-") {
+	// The account storefront is "ID-lang,platform" or "ID,platform". Keep it
+	// as-is when the flag names the same ID. Otherwise swap the ID but keep the
+	// platform, which commerce requests send in X-Apple-Store-Front; the
+	// language is dropped because it may not exist in the new storefront.
+	id, platform, hasPlatform := strings.Cut(acc.StoreFront, ",")
+	id, _, _ = strings.Cut(id, "-")
+
+	if id == sf {
 		return acc, nil
 	}
 
-	acc.StoreFront = sf
+	if hasPlatform {
+		sf += "," + platform
+	}
 
-	return acc, nil
+	cfg.Apple.StoreFrontOverride = sf
+
+	return cfg.Apple.Account(), nil
 }
 
 // withAuth runs fn with up to `retries` attempts, recovering from the two

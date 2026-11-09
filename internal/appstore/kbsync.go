@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"sync"
 
-	apphttp "github.com/londek/ipadecrypt/internal/apphttp"
 	"github.com/londek/ipadecrypt/internal/sap/assets"
 	"github.com/londek/ipadecrypt/internal/sap/machine"
 )
@@ -123,7 +122,7 @@ func (c *Client) entDownload(acc *Account, app App, g, externalVersionID string)
 
 	var out downloadResult
 
-	res, err := c.send("request", http.MethodPost, fmt.Sprintf("%s?guid=%s", entURL, g), headers, &apphttp.XMLPayload{Content: payload}, nil, formatXML, &out)
+	res, err := c.sendCommerce(fmt.Sprintf("%s?guid=%s", entURL, g), g, headers, payload, &out)
 	if err != nil {
 		return downloadItem{}, false, fmt.Errorf("ent/download request: %w", err)
 	}

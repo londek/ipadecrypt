@@ -57,6 +57,28 @@ func (e *executor) Send(request apphttp.Request, body []byte) (*http.Response, e
 		ctx = context.Background()
 	}
 
+	if e.operation == "bag-direct" {
+		direct, err := http.NewRequestWithContext(ctx, request.Method, request.URL, bytes.NewReader(body))
+		if err != nil {
+			return nil, fmt.Errorf("create Store request: %w", err)
+		}
+
+		for key, value := range request.Headers {
+			direct.Header.Set(key, value)
+		}
+
+		if direct.Header.Get("User-Agent") == "" {
+			direct.Header.Set("User-Agent", apphttp.DefaultUserAgent)
+		}
+
+		response, err := e.backend.requestTransport(directRequest(request.Timeout))(direct)
+		if err != nil {
+			return nil, err
+		}
+
+		return e.backend.cacheBag(response)
+	}
+
 	input := emulator.Request{URL: request.URL, Method: request.Method, Operation: e.operation, Format: string(request.ResponseFormat), Timeout: request.Timeout, Body: body, Headers: make(http.Header), NoRedirects: request.NoRedirects, Raw: request.ResponseFormat == apphttp.ResponseFormatRaw}
 	for key, value := range request.Headers {
 		input.Headers.Set(key, value)
@@ -79,6 +101,10 @@ func (e *executor) Send(request apphttp.Request, body []byte) (*http.Response, e
 func (e *executor) Do(request *http.Request) (*http.Response, error) {
 	if request == nil {
 		return nil, errors.New("store request is nil")
+	}
+
+	if e.operation == "sap" {
+		return e.backend.requestTransport(directRequest(0))(request)
 	}
 
 	var body []byte
@@ -239,22 +265,46 @@ func (b *Backend) execute(ctx context.Context, input emulator.Request) (*http.Re
 		response.ContentLength = int64(len(data))
 	}
 
-	if strings.Contains(input.URL, "init.itunes.apple.com/bag.xml") && response.StatusCode == http.StatusOK {
-		data, e := io.ReadAll(response.Body)
-		_ = response.Body.Close()
+	if strings.Contains(input.URL, "init.itunes.apple.com/bag.xml") {
+		return b.cacheBag(response)
+	}
 
-		if e != nil {
-			return nil, fmt.Errorf("read Store response: %w", e)
-		}
+	return response, nil
+}
 
-		response.Body = io.NopCloser(bytes.NewReader(data))
+// directRequest describes a request sent on the fresh-connection auth
+// transport outside the guest. Unlike guest requests it has no framework
+// deadline, so it always carries a total timeout.
+func directRequest(timeout time.Duration) emulator.Request {
+	if timeout == 0 {
+		timeout = apphttp.DefaultAuthenticationTimeout
+	}
 
-		var values map[string]any
-		if e = apphttp.DecodePropertyList(data, &values); e == nil {
-			b.mu.Lock()
-			b.bag = values
-			b.mu.Unlock()
-		}
+	return emulator.Request{Operation: "authenticate", Timeout: timeout}
+}
+
+// cacheBag remembers a successful bag.xml response for later purchase
+// requests and returns the response with its body restored. The guest
+// flattens urlBag, so both bag layouts are usable.
+func (b *Backend) cacheBag(response *http.Response) (*http.Response, error) {
+	if response.StatusCode != http.StatusOK {
+		return response, nil
+	}
+
+	data, err := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+
+	if err != nil {
+		return nil, fmt.Errorf("read Store response: %w", err)
+	}
+
+	response.Body = io.NopCloser(bytes.NewReader(data))
+
+	var values map[string]any
+	if err := apphttp.DecodePropertyList(data, &values); err == nil {
+		b.mu.Lock()
+		b.bag = values
+		b.mu.Unlock()
 	}
 
 	return response, nil

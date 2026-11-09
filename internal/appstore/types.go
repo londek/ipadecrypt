@@ -66,11 +66,19 @@ const (
 	// authenticate endpoint (optionally on a <pod>-buy.itunes.apple.com host).
 	PrivateAppStoreAPIPathAuth = "/WebObjects/MZFinance.woa/wa/authenticate"
 
+	// Native authenticate endpoint the bag may advertise instead of MZFinance,
+	// and the Store provisioning endpoint used to answer an "SP" machine action.
 	PrivateAuthDomain     = "auth." + iTunesDomain
-	PrivateAuthPathNative = "/auth/v1/native/fast/"
+	PrivateAuthPathNative = "/auth/v1/native"
+	provisioningURL       = "https://auth.itunes.apple.com/auth/v1/otp/1.5/finish"
 
-	hdrStoreFront = "X-Set-Apple-Store-Front"
-	hdrPod        = "pod"
+	// storeUserAgent is the Configurator identity Apple expects on
+	// authenticate, bag and commerce requests.
+	storeUserAgent = "Configurator/2.21 (Macintosh; OS X 27.0.1; 26A434) AppleWebKit/0625.2.5.11.6"
+
+	hdrStoreFront        = "X-Set-Apple-Store-Front"
+	hdrRequestStoreFront = "X-Apple-Request-Store-Front"
+	hdrPod               = "pod"
 
 	supportedSAPVersion = 200
 
