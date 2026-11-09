@@ -447,8 +447,12 @@ func interpretLogin(res *http.Response, out *loginResult, attempt int, authCode 
 		return false, ErrAuthCodeRequired
 	}
 
-	if err := authenticationDialogError(out); err != nil {
-		return false, err
+	// A dialog alongside a token is informational; only a tokenless one
+	// explains why sign-in stopped.
+	if out.PasswordToken == "" {
+		if err := authenticationDialogError(out); err != nil {
+			return false, err
+		}
 	}
 
 	if out.FailureType == "" && out.CustomerMessage == custMsgAccountDisabled {

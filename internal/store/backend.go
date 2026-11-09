@@ -15,10 +15,10 @@ import (
 	"sync"
 	"time"
 
+	apphttp "github.com/londek/ipadecrypt/internal/apphttp"
 	"github.com/londek/ipadecrypt/internal/sap/assets"
 	"github.com/londek/ipadecrypt/internal/store/emulator"
 	"github.com/londek/ipadecrypt/internal/store/profile"
-	apphttp "github.com/londek/ipadecrypt/internal/apphttp"
 )
 
 type Backend struct {

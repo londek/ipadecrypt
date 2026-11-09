@@ -171,7 +171,8 @@ func verifyDevice(d *sshDevice, program, udid string) error {
 
 // triggerApp finds the first installed App Store app with a supported license
 // and returns its bundle path, main executable name, and license bytes.
-// Mirrors retrieve.py trigger_app with no account filter.
+// accountFilter, when set, is the SINF "user" atom (the low 32 bits of the
+// account DSID) a license must carry. Mirrors retrieve.py trigger_app.
 func triggerApp(d *sshDevice, accountFilter []byte) (bundle, executable string, sinf []byte, err error) {
 	listing, err := d.run("find /var/containers/Bundle/Application -type f -path '*/SC_Info/*.sinf' -print0", nil)
 	if err != nil {

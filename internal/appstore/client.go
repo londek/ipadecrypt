@@ -10,9 +10,9 @@ import (
 	"strings"
 	"sync"
 
+	cookiejar "github.com/juju/persistent-cookiejar"
 	"github.com/londek/ipadecrypt/internal/store"
 	"github.com/londek/ipadecrypt/internal/storeauth"
-	cookiejar "github.com/juju/persistent-cookiejar"
 )
 
 // AnisetteFile is the persisted Anisette state, kept next to the cookies file.

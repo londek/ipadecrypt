@@ -45,7 +45,7 @@ func (r purchaseResult) failure() error {
 // Tries the App Store pricing family first, falls back to Arcade.
 func (c *Client) Purchase(acc *Account, app App) error {
 	// if app.Price > 0 {
-		// return ErrPaidAppNotOwned
+	// return ErrPaidAppNotOwned
 	// }
 	g, err := guid()
 	if err != nil {
