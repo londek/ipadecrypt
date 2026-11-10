@@ -14,8 +14,10 @@ import (
 )
 
 const (
-	cpuTypeARM64 = 0x0100000C
-	pageSize     = 4096
+	cpuTypeARM64     = 0x0100000C
+	cpuSubtypeARM64E = 2
+	cpuSubtypeMask   = 0x00FFFFFF
+	pageSize         = 4096
 
 	lcEncryptionInfo64 = 0x2C
 	machoMagic64LE     = 0xFEEDFACF
@@ -78,16 +80,21 @@ func xorBytes(a, b []byte) []byte {
 	return out
 }
 
-// machoInfo locates the encrypted arm64 region within a (possibly fat) Mach-O.
+// machoInfo locates the arm64 slice and its encrypted region within a
+// (possibly fat) Mach-O.
 type machoInfo struct {
 	base          int
+	size          int
 	cryptOff      int
 	cryptSize     int
 	cryptidOffset int
 }
 
 // arm64EncryptionInfo parses the Mach-O header(s) and returns the single
-// encrypted arm64 slice's region. It mirrors core.py arm64_encryption_info.
+// encrypted arm64 slice's region. It mirrors core.py arm64_encryption_info,
+// except that arm64e fat siblings are ignored: only the plain arm64 SUPF
+// records are supported (see arm64SupfRecordOffset), and the output is thinned
+// to that slice anyway.
 func arm64EncryptionInfo(data []byte) (machoInfo, error) {
 	var base, sliceSize int
 
@@ -103,10 +110,11 @@ func arm64EncryptionInfo(data []byte) (machoInfo, error) {
 		for i := range count {
 			off := 8 + i*20
 			cpu := binary.BigEndian.Uint32(data[off:])
+			sub := binary.BigEndian.Uint32(data[off+4:])
 			sliceOff := int(binary.BigEndian.Uint32(data[off+8:]))
 
 			size := int(binary.BigEndian.Uint32(data[off+12:]))
-			if cpu == cpuTypeARM64 {
+			if cpu == cpuTypeARM64 && sub&cpuSubtypeMask != cpuSubtypeARM64E {
 				base, sliceSize = sliceOff, size
 				found++
 			}
@@ -126,10 +134,11 @@ func arm64EncryptionInfo(data []byte) (machoInfo, error) {
 		for i := range count {
 			off := 8 + i*32
 			cpu := binary.BigEndian.Uint32(data[off:])
+			sub := binary.BigEndian.Uint32(data[off+4:])
 			sliceOff := int(binary.BigEndian.Uint64(data[off+8:]))
 
 			size := int(binary.BigEndian.Uint64(data[off+16:]))
-			if cpu == cpuTypeARM64 {
+			if cpu == cpuTypeARM64 && sub&cpuSubtypeMask != cpuSubtypeARM64E {
 				base, sliceSize = sliceOff, size
 				found++
 			}
@@ -212,7 +221,7 @@ func arm64EncryptionInfo(data []byte) (machoInfo, error) {
 		return machoInfo{}, errors.New("invalid encrypted region bounds")
 	}
 
-	return machoInfo{base: base, cryptOff: cryptOff, cryptSize: cryptSize, cryptidOffset: cryptidOffset}, nil
+	return machoInfo{base: base, size: sliceSize, cryptOff: cryptOff, cryptSize: cryptSize, cryptidOffset: cryptidOffset}, nil
 }
 
 // errCryptidZero reports a slice whose cryptid is already 0 (not encrypted).
@@ -528,10 +537,12 @@ func xor16(a [16]byte, b [16]byte) [16]byte {
 	return out
 }
 
-// decryptBinary decrypts every encrypted arm64 page of a Mach-O in place and
-// clears cryptid. Mirrors core.py decrypt_binary. Returns the decrypted bytes
-// and the number of pages processed; errCryptidZero if the slice is not
-// encrypted.
+// decryptBinary decrypts every encrypted arm64 page of a Mach-O and clears
+// cryptid. Mirrors core.py decrypt_binary, except that a fat binary is thinned
+// to its arm64 slice: the sibling slices (armv7, arm64e) stay FairPlay-encrypted
+// and can't be decrypted offline, so they are dropped like the on-device
+// helper does. Returns the decrypted thin Mach-O and the number of pages processed;
+// errCryptidZero if the slice is not encrypted.
 func decryptBinary(source, sinf, supf, credential []byte) ([]byte, int, error) {
 	info, err := arm64EncryptionInfo(source)
 	if err != nil {
@@ -555,8 +566,10 @@ func decryptBinary(source, sinf, supf, credential []byte) ([]byte, int, error) {
 		return nil, 0, err
 	}
 
-	result := make([]byte, len(source))
-	copy(result, source)
+	slice := source[info.base : info.base+info.size]
+
+	result := make([]byte, len(slice))
+	copy(result, slice)
 
 	for localPage := range pageCount {
 		record := supf[recordStart+32*localPage : recordStart+32*(localPage+1)]
@@ -571,8 +584,8 @@ func decryptBinary(source, sinf, supf, credential []byte) ([]byte, int, error) {
 			return nil, 0, err
 		}
 
-		start := info.base + info.cryptOff + pageSize*localPage
-		ciphertext := source[start : start+pageSize]
+		start := info.cryptOff + pageSize*localPage
+		ciphertext := slice[start : start+pageSize]
 
 		block, err := aes.NewCipher(key[:])
 		if err != nil {
@@ -582,7 +595,7 @@ func decryptBinary(source, sinf, supf, credential []byte) ([]byte, int, error) {
 		cipher.NewCBCDecrypter(block, record[16:32]).CryptBlocks(result[start:start+pageSize], ciphertext)
 	}
 
-	binary.LittleEndian.PutUint32(result[info.cryptidOffset:], 0)
+	binary.LittleEndian.PutUint32(result[info.cryptidOffset-info.base:], 0)
 
 	return result, pageCount, nil
 }

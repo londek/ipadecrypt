@@ -22,6 +22,10 @@ const (
 
 	LCEncryptionInfo   = 0x21
 	LCEncryptionInfo64 = 0x2c
+
+	// CPU_SUBTYPE_MASK is the feature-bits mask on cpusubtype; the slice-
+	// selection match ignores these bits.
+	cpuSubtypeFeatureMask uint32 = 0x00ffffff
 )
 
 // IsMagic reports whether b starts with any thin or fat Mach-O magic.
@@ -33,6 +37,20 @@ func IsMagic(b []byte) bool {
 	switch binary.LittleEndian.Uint32(b) {
 	case MagicLE, Magic64LE, MagicBE, Magic64BE,
 		FatMagic, FatCigam, FatMagic64, FatCigam64:
+		return true
+	}
+
+	return false
+}
+
+// IsFat reports whether b starts with a fat (universal) Mach-O magic.
+func IsFat(b []byte) bool {
+	if len(b) < 4 {
+		return false
+	}
+
+	switch binary.LittleEndian.Uint32(b) {
+	case FatMagic, FatCigam, FatMagic64, FatCigam64:
 		return true
 	}
 
@@ -168,6 +186,24 @@ func FatSlices(data []byte) ([]Slice, error) {
 	}
 
 	return nil, fmt.Errorf("not Mach-O magic=0x%x", magic)
+}
+
+// PickSlice returns the slice of data whose (cputype, cpusubtype) matches.
+// For a thin Mach-O the whole file is returned when it matches. cpusubtype
+// is compared modulo the feature bits.
+func PickSlice(data []byte, cpu, sub uint32) ([]byte, error) {
+	slices, err := FatSlices(data)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, s := range slices {
+		if s.Cpu == cpu && s.Sub&cpuSubtypeFeatureMask == sub&cpuSubtypeFeatureMask {
+			return data[s.Offset : s.Offset+s.Size], nil
+		}
+	}
+
+	return nil, fmt.Errorf("no slice matched cputype=0x%x cpusubtype=0x%x", cpu, sub)
 }
 
 func readAnyThinCpu(data []byte) (cpu, sub uint32, err error) {

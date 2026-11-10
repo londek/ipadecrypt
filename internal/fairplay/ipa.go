@@ -21,8 +21,9 @@ type Summary struct {
 
 // Decrypt reads the encrypted IPA at srcIPA, decrypts every FairPlay-protected
 // arm64 binary it can (main app, frameworks, extensions) using the 16-byte
-// account credential, and writes a decrypted IPA to dst. SC_Info, Watch apps
-// and iTunesMetadata are stripped from the output (see pipeline.Assemble).
+// account credential, and writes a decrypted IPA to dst. Fat binaries come out
+// thinned to their arm64 slice. SC_Info, Watch apps and iTunesMetadata are
+// stripped from the output (see pipeline.Assemble).
 // With skipAppex, .appex binaries are left out of the decrypt plan.
 func Decrypt(srcIPA string, dst io.Writer, credential []byte, skipAppex bool) (Summary, error) {
 	if len(credential) != 16 {

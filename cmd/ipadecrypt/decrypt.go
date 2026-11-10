@@ -311,8 +311,8 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 	//
 	// Decrypt: offline FairPlay first (no device); fall back to on-device
-	// decryption for apps the arm64-only offline path can't fully handle
-	// (e.g. old builds that still ship a 32-bit slice).
+	// decryption for apps the offline path can't fully handle (e.g. an
+	// unsupported SINF/SUPF format).
 	//
 
 	outLocal, err := localOutputPath(decryptOutput, appBundleID, appVersion)
@@ -334,14 +334,14 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 			return
 		}
 
-		// offlineNeedsDevice: the offline arm64 decrypt left a slice
-		// encrypted (or couldn't handle the app). Decide on the fallback.
+		// offlineNeedsDevice: the offline decrypt left a binary encrypted
+		// (or couldn't handle the app). Decide on the fallback.
 		switch {
 		case decryptNoOnDevice:
-			tui.Warn("offline decrypt left encrypted slice(s); on-device fallback suppressed (--no-on-device)")
+			tui.Warn("offline decrypt couldn't fully decrypt this app; on-device fallback suppressed (--no-on-device)")
 			return
 		case !deviceConfigured:
-			tui.Err("offline decryption couldn't fully decrypt this app (commonly an old build that still ships a 32-bit slice); on-device decryption is required")
+			tui.Err("offline decryption couldn't fully decrypt this app; on-device decryption is required")
 			tui.Info("run `ipadecrypt bootstrap` to set up your jailbroken device, then re-run")
 
 			return
@@ -371,9 +371,9 @@ const (
 // attemptOfflineDecrypt runs the no-device FairPlay decrypt into outLocal and
 // verifies it. It returns offlineDone when the output verifies, offlineFatal
 // for an error already surfaced to the user (e.g. a credential that belongs to
-// a different account), and offlineNeedsDevice when the arm64-only offline path
-// couldn't fully decrypt the app (a still-encrypted 32-bit slice, or an app it
-// can't parse) - the caller then decides whether to fall back to the device.
+// a different account), and offlineNeedsDevice when the offline path couldn't
+// fully decrypt the app (a still-encrypted binary, or an app it can't parse) -
+// the caller then decides whether to fall back to the device.
 // On any non-done outcome the partial output is removed so a fallback writes a
 // clean file.
 func attemptOfflineDecrypt(encPath string, credential []byte, outLocal string) offlineOutcome {
@@ -459,11 +459,11 @@ func attemptOfflineDecrypt(encPath string, credential []byte, outLocal string) o
 		return offlineDone
 	}
 
-	// A failure whose only symptom is still-encrypted slices is the 32-bit
-	// (armv7) gap the arm64-only offline decryptor can't close - hand it to
-	// the device fallback.
+	// A failure whose only symptom is still-encrypted binaries is one the
+	// offline decryptor had no SUPF record for - hand it to the device
+	// fallback.
 	if len(res.StillEncrypted) > 0 && len(res.AllZeroCrypt) == 0 && len(res.Mismatches) == 0 {
-		live.Fail("%d slice(s) still encrypted (32-bit; offline decrypt is arm64-only)", len(res.StillEncrypted))
+		live.Fail("%d binary(s) still encrypted (not decryptable offline)", len(res.StillEncrypted))
 
 		for _, n := range res.StillEncrypted {
 			tui.Info("  %s still encrypted (cryptid != 0)", n)

@@ -11,8 +11,7 @@ ipadecrypt has three parts:
 - **On-device decrypt helper** - a signed arm64 iOS program
   (`internal/device/ipadecrypt-helper-arm64`, `go:embed`ed from the C sources in
   `helper/`). Pushed to a jailbroken device only for the on-device fallback that
-  decrypts old apps still shipping a 32-bit slice, which the arm64-only offline
-  decryptor can't handle.
+  decrypts apps the offline decryptor can't handle.
 
 ## Prerequisites
 

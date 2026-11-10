@@ -41,9 +41,8 @@ func (r VerifyResult) OK() bool {
 // corruption. When skipAppex is true, entries under Payload/<App>.app
 // /PlugIns/ are ignored - decryption left them encrypted on purpose.
 //
-// The offline decryptor rewrites binaries in place, so each output entry is
-// byte-identical to its source counterpart except within the encrypted
-// arm64 slice.
+// A decrypted binary comes out thin - fat siblings are dropped - so each
+// such output entry maps to one specific slice of a (possibly fat) source.
 func Verify(outputIPA, sourceIPA string, skipAppex bool) (VerifyResult, error) {
 	var res VerifyResult
 
@@ -192,91 +191,72 @@ func readMachO(f *zip.File) ([]byte, bool, error) {
 }
 
 // compareMachOSlice returns "" when the output is consistent with the
-// source. The offline decryptor works in place inside the full (possibly
-// fat) file: only the encrypted arm64 slice's cryptid u32 and crypt region
-// change, everything else is byte-identical. So output and source must be
-// the same length and equal everywhere except, within the source's single
-// encrypted slice, the cryptid word (zeroed) and the crypt bytes (plaintext).
+// source. Two cases:
+//   - Output fat → nothing decrypted it; must match source verbatim.
+//   - Output thin → a decrypted slice whose fat siblings were dropped (or a
+//     thin passthrough); pick the matching cputype slice in source, which
+//     must be equal everywhere except the cryptid word (zeroed) and the
+//     crypt bytes (plaintext).
 func compareMachOSlice(outData, srcData []byte) string {
-	if len(outData) != len(srcData) {
-		return fmt.Sprintf("size differs: output=%d source=%d", len(outData), len(srcData))
-	}
+	srcSlice := srcData
 
-	slices, err := macho.FatSlices(srcData)
-	if err != nil {
-		return "parse source: " + err.Error()
-	}
-
-	var (
-		found    bool
-		sliceOff uint64
-		srcCrypt macho.EncryptionInfo
-	)
-
-	for _, s := range slices {
-		info, err := macho.ReadEncryptionInfo(srcData[s.Offset : s.Offset+s.Size])
+	if !macho.IsFat(outData) {
+		outSlices, err := macho.FatSlices(outData)
 		if err != nil {
-			continue
+			return "parse output: " + err.Error()
 		}
 
-		if found {
-			return "source has more than one encrypted slice"
+		srcSlice, err = macho.PickSlice(srcData, outSlices[0].Cpu, outSlices[0].Sub)
+		if err != nil {
+			return "match source slice: " + err.Error()
 		}
-
-		found = true
-		sliceOff = s.Offset
-		srcCrypt = info
 	}
 
-	// No encrypted slice in source → nothing should have changed.
-	if !found {
-		if bytes.Equal(outData, srcData) {
+	if len(outData) != len(srcSlice) {
+		return fmt.Sprintf("size differs: output=%d source=%d", len(outData), len(srcSlice))
+	}
+
+	// Nothing FairPlay-encrypted in the source → nothing should have changed.
+	srcCrypt, err := macho.ReadEncryptionInfo(srcSlice)
+	if err != nil || srcCrypt.Cryptid == 0 {
+		if bytes.Equal(outData, srcSlice) {
 			return ""
 		}
 
 		return "output differs from unencrypted source"
 	}
 
-	cryptidAbs := sliceOff + srcCrypt.CryptidOffset
-	cryptStart := sliceOff + srcCrypt.CryptOff
+	cryptidOff := srcCrypt.CryptidOffset
+	cryptStart := srcCrypt.CryptOff
 	cryptEnd := cryptStart + srcCrypt.CryptSize
 
 	if cryptEnd > uint64(len(outData)) {
 		return "crypt region exceeds file"
 	}
 
-	if !bytes.Equal(outData[:cryptidAbs], srcData[:cryptidAbs]) {
+	if !bytes.Equal(outData[:cryptidOff], srcSlice[:cryptidOff]) {
 		return "bytes before cryptid differ"
 	}
 
-	if binary.LittleEndian.Uint32(outData[cryptidAbs:cryptidAbs+4]) != 0 {
+	if binary.LittleEndian.Uint32(outData[cryptidOff:cryptidOff+4]) != 0 {
 		return "cryptid not zeroed"
 	}
 
-	if !bytes.Equal(outData[cryptidAbs+4:cryptStart], srcData[cryptidAbs+4:cryptStart]) {
+	if !bytes.Equal(outData[cryptidOff+4:cryptStart], srcSlice[cryptidOff+4:cryptStart]) {
 		return "load-commands between cryptid and cryptoff differ"
 	}
 
-	if !bytes.Equal(outData[cryptEnd:], srcData[cryptEnd:]) {
+	if !bytes.Equal(outData[cryptEnd:], srcSlice[cryptEnd:]) {
 		return "bytes after encrypted region differ (LINKEDIT/etc)"
 	}
 
 	outCrypt := outData[cryptStart:cryptEnd]
 
-	// Source already plaintext: bytes must match verbatim.
-	if srcCrypt.Cryptid == 0 {
-		if bytes.Equal(outCrypt, srcData[cryptStart:cryptEnd]) {
-			return ""
-		}
-
-		return "crypt region differs from already-plaintext source"
-	}
-
 	if isAllZero(outCrypt) {
 		return "crypt region is all zeros (decrypt produced no plaintext)"
 	}
 
-	if bytes.Equal(outCrypt, srcData[cryptStart:cryptEnd]) {
+	if bytes.Equal(outCrypt, srcSlice[cryptStart:cryptEnd]) {
 		return "crypt region byte-equal to source ciphertext (cryptid zeroed without decrypting)"
 	}
 

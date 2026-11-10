@@ -25,18 +25,19 @@ After that, downloading and decrypting any app for that account is fully
 offline.
 
 The offline decryptor handles **arm64** slices (everything the modern App Store
-ships). A few old builds still ship a **32-bit (armv7) slice** - those can't be
-decrypted offline, so ipadecrypt automatically falls back to decrypting them
-**on your jailbroken device** when one is configured (the same device used for
-minting). Pass `--no-on-device` to disable the fallback, or `--on-device` to go
-straight to the device.
+ships). Old builds that still ship a **32-bit (armv7) slice** are thinned to
+their arm64 slice - the 32-bit slice is dropped from the output. If an app
+can't be decrypted offline at all, ipadecrypt automatically falls back to
+decrypting it **on your jailbroken device** when one is configured (the same
+device used for minting). Pass `--no-on-device` to disable the fallback, or
+`--on-device` to go straight to the device.
 
 ## Requirements
 
 ### On your computer
-- Nothing special for everyday (arm64) decrypting. A jailbroken iPhone reachable
-  over the network (or over USB with `iproxy`) is needed for the one-time mint,
-  and again only for the on-device fallback on old 32-bit apps.
+- Nothing special for everyday decrypting. A jailbroken iPhone reachable over
+  the network (or over USB with `iproxy`) is needed for the one-time mint, and
+  again only for the on-device fallback on apps that can't be decrypted offline.
 
 ### On the jailbroken iPhone
 | Requirement | Purpose |
@@ -77,12 +78,11 @@ A three-step interactive wizard:
 
 1. **App Store sign-in** - Logs into the App Store. Credentials stay local in `~/.ipadecrypt/config.json`. The first sign-in downloads and caches the Apple frameworks the App Store engine emulates (~tens of MB, range-extracted from a pinned macOS image) under `~/.cache/ipadecrypt/`; later runs reuse the cache.
 2. **Credential mint** - Connects once to your jailbroken device over root SSH and extracts the reusable account credential, cached under `~/.ipadecrypt/credentials/`.
-3. **On-device fallback check** - Verifies the device is ready to decrypt old apps that still ship a 32-bit slice (AppSync Unified + `appinst` present, helper uploads and execs). Best-effort: a missing prerequisite only disables that fallback and is reported, not fatal.
+3. **On-device fallback check** - Verifies the device is ready to decrypt apps the offline decryptor can't handle (AppSync Unified + `appinst` present, helper uploads and execs). Best-effort: a missing prerequisite only disables that fallback and is reported, not fatal.
 
 Run it again anytime; it skips minting if a credential is already cached (pass
-`--remint` to force). After bootstrap, decrypting modern (arm64) apps is fully
-offline - the device is only needed again for the on-device fallback on old
-32-bit apps.
+`--remint` to force). After bootstrap, decrypting is fully offline - the device
+is only needed again for the on-device fallback.
 
 ### Decrypt an app
 
@@ -90,9 +90,9 @@ offline - the device is only needed again for the on-device fallback on old
 ipadecrypt decrypt <bundle-id|app-store-id|app-store-url|path-to-local-ipa>
 ```
 
-This decrypts offline. If the app ships a 32-bit slice the offline path can't
-handle and a jailbroken device is configured, ipadecrypt automatically falls
-back to decrypting it on the device. Useful flags:
+This decrypts offline. If the offline path can't handle the app and a
+jailbroken device is configured, ipadecrypt automatically falls back to
+decrypting it on the device. Useful flags:
 
 - `--on-device` - skip the offline attempt and decrypt on the device directly.
 - `--no-on-device` - never touch the device; fail if offline can't fully decrypt.
@@ -109,7 +109,7 @@ ipadecrypt versions <bundle-id|app-store-id|app-store-url>
 
 - Only the supported SINF/SUPF license formats decrypt offline; apps shipping a newer, unsupported `SC_Info` format fall back to the on-device path when a device is configured.
 - The credential is per Apple account: decrypting an app requires signing in with (and having minted from) the account that owns it.
-- Old builds that still ship a 32-bit (armv7) slice can't be decrypted offline (the offline decryptor is arm64-only) - they need the on-device fallback, so a jailbroken device must be configured.
+- Only arm64 slices are decrypted: a fat binary is thinned to its arm64 slice, so 32-bit (armv7) and arm64e slices are dropped from the output. An app with no arm64 slice can't be decrypted offline.
 
 ## License
 

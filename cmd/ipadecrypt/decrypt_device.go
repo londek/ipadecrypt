@@ -76,10 +76,10 @@ type helperProgress struct {
 // runDeviceDecrypt performs the on-device FairPlay decrypt fallback: it
 // connects to the configured jailbroken device, installs the host-side
 // encrypted IPA, runs the inject + mremap_encrypted helper to decrypt every
-// slice (incl. the 32-bit slice the offline path cannot), assembles the
-// decrypted IPA at outLocal by fusing the helper's Mach-Os into the source
-// IPA, and re-verifies. encPath is the encrypted source IPA already on the
-// host; cleanups owns device teardown so it runs on a live session.
+// binary's runtime slice, assembles the decrypted IPA at outLocal by fusing
+// the helper's Mach-Os into the source IPA, and re-verifies. encPath is the
+// encrypted source IPA already on the host; cleanups owns device teardown so
+// it runs on a live session.
 func runDeviceDecrypt(cfg *config.Config, cleanups *cleanupStack, encPath, appBundleID, appVersion, outLocal string) error {
 	live := tui.NewLive()
 	live.Spin("connecting to %s", deviceEndpoint(cfg.Device))

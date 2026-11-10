@@ -129,8 +129,8 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 }
 
 // verifyDeviceDecryptReady checks that the configured device can serve the
-// on-device decrypt fallback - the path that handles old apps still shipping a
-// 32-bit slice, which the arm64-only offline decryptor can't. It confirms
+// on-device decrypt fallback - the path that handles apps the offline
+// decryptor can't (e.g. an unsupported SINF/SUPF format). It confirms
 // AppSync Unified + appinst are present and that the embedded helper uploads
 // and execs. It is best-effort: offline decryption works regardless, so a
 // missing prerequisite only disables the fallback and never fails bootstrap.
@@ -138,11 +138,11 @@ func verifyDeviceDecryptReady(cfg *config.Config) {
 	tui.Step(3, 3, "Verify on-device decrypt fallback")
 
 	if cfg.Device.Host == "" && !cfg.Device.USB {
-		tui.Info("no device configured - skipping; old apps that ship a 32-bit slice won't be decryptable until you set one up")
+		tui.Info("no device configured - skipping; apps the offline decryptor can't handle won't be decryptable until you set one up")
 		return
 	}
 
-	tui.Info("Old apps that still ship a 32-bit slice can't be decrypted offline;\nipadecrypt falls back to decrypting them on this device. That needs two\nSileo packages - offline decryption works without them:")
+	tui.Info("A few apps can't be decrypted offline; ipadecrypt falls back to\ndecrypting them on this device. That needs two Sileo packages - offline\ndecryption works without them:")
 	tui.Bullet("AppSync Unified   bypasses installd's signature check (repo: https://lukezgd.github.io/repo)")
 	tui.Bullet("appinst           installs the patched IPA on the device")
 
@@ -207,8 +207,8 @@ func verifyDeviceDecryptReady(cfg *config.Config) {
 	}
 
 	if missing > 0 {
-		tui.Warn("on-device fallback not ready (%d issue(s)) - old 32-bit apps will fail until it's fixed", missing)
-		tui.Info("offline decryption is unaffected; this only matters for old apps that ship a 32-bit slice")
+		tui.Warn("on-device fallback not ready (%d issue(s)) - apps that can't be decrypted offline will fail until it's fixed", missing)
+		tui.Info("offline decryption is unaffected; this only matters for the few apps it can't handle")
 
 		return
 	}
