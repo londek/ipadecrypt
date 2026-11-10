@@ -14,6 +14,8 @@
 
 <img width="90%" src="https://github.com/user-attachments/assets/ba8dbd32-a2fb-49cc-afee-3aa88050718e" />
 
+<a href="https://verislabs.io/solutions/akamai-bmp?utm_source=github&amp;utm_medium=readme&amp;utm_campaign=ipadecrypt"><img width="750" src=".github/sponsor-verislabs.svg" alt="Sponsored by Veris Labs: stop debugging headers. Akamai BMP sensor data (x-acf-sensor-data) for iOS apps from one request, ~10 ms, BMP 3.x to 4.4.0."></a>
+
 </div>
 
 ## How it works
@@ -42,7 +44,7 @@ device used for minting). Pass `--no-on-device` to disable the fallback, or
 ### On the jailbroken iPhone
 | Requirement | Purpose |
 |---|---|
-| **OpenSSH with root access** | The mint and the on-device fallback connect over root SSH (install OpenSSH from Sileo) |
+| **OpenSSH** | The mint and the on-device fallback connect over SSH (install OpenSSH from Sileo), as `root` or as a user that can `sudo` - `mobile` on Dopamine and palera1n rootless, where root has no password by default |
 | **≥1 owned App Store app installed** | Bought with the same Apple ID; used to trigger FairPlay once during the mint |
 | **AppSync Unified + `appinst`** | Only for the on-device fallback: installs the app on the device so it can be decrypted |
 
@@ -77,7 +79,7 @@ ipadecrypt bootstrap
 A three-step interactive wizard:
 
 1. **App Store sign-in** - Logs into the App Store. Credentials stay local in `~/.ipadecrypt/config.json`. The first sign-in downloads and caches the Apple frameworks the App Store engine emulates (~tens of MB, range-extracted from a pinned macOS image) under `~/.cache/ipadecrypt/`; later runs reuse the cache.
-2. **Credential mint** - Connects once to your jailbroken device over root SSH and extracts the reusable account credential, cached under `~/.ipadecrypt/credentials/`.
+2. **Credential mint** - Connects once to your jailbroken device over SSH and extracts the reusable account credential, cached under `~/.ipadecrypt/credentials/`.
 3. **On-device fallback check** - Verifies the device is ready to decrypt apps the offline decryptor can't handle (AppSync Unified + `appinst` present, helper uploads and execs). Best-effort: a missing prerequisite only disables that fallback and is reported, not fatal.
 
 Run it again anytime; it skips minting if a credential is already cached (pass
