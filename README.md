@@ -14,7 +14,7 @@
 
 <img width="90%" src="https://github.com/user-attachments/assets/ba8dbd32-a2fb-49cc-afee-3aa88050718e" />
 
-<a href="https://verislabs.io/solutions/akamai-bmp?utm_source=github&amp;utm_medium=readme&amp;utm_campaign=ipadecrypt"><img width="750" src=".github/sponsor-verislabs.svg" alt="Sponsored by Veris Labs: stop debugging headers. Akamai BMP sensor data (x-acf-sensor-data) for iOS apps from one request, ~10 ms, BMP 3.x to 4.4.0."></a>
+<a href="https://verislabs.io/?utm_source=github&amp;utm_medium=readme&amp;utm_campaign=ipadecrypt"><img width="750" src=".github/sponsor-verislabs.svg" alt="Sponsored by Veris Labs: stop debugging headers. Akamai BMP sensor data (x-acf-sensor-data) for iOS apps from one request, ~10 ms, BMP 3.x to 4.4.0."></a>
 
 </div>
 
