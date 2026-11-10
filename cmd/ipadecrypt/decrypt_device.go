@@ -73,6 +73,34 @@ type helperProgress struct {
 	dumpedOther      atomic.Int64
 }
 
+// ensureDeviceSudo makes sure the device accepts our sudo password, which
+// every on-device step elevates with. Key auth stores none, so when sudo
+// rejects it this asks for one and saves it for the next run.
+func ensureDeviceSudo(cfg *config.Config, dev *device.Client) error {
+	err := dev.CheckSudo()
+
+	for range 3 {
+		if !errors.Is(err, device.ErrSudoPasswordRejected) || cfg.Device.Auth.Kind != "key" {
+			return err
+		}
+
+		pw, perr := tui.PromptPassword(fmt.Sprintf("sudo password for %s on the device", cfg.Device.User))
+		if perr != nil || pw == "" {
+			return err
+		}
+
+		dev.SetSudoPassword(pw)
+
+		if err = dev.CheckSudo(); err == nil {
+			cfg.Device.Auth.Password = pw
+
+			return cfg.Save()
+		}
+	}
+
+	return err
+}
+
 // runDeviceDecrypt performs the on-device FairPlay decrypt fallback: it
 // connects to the configured jailbroken device, installs the host-side
 // encrypted IPA, runs the inject + mremap_encrypted helper to decrypt every
@@ -122,6 +150,11 @@ func runDeviceDecrypt(cfg *config.Config, cleanups *cleanupStack, encPath, appBu
 	}
 
 	live.OK("%s · iOS %s %s %s (%s)", deviceEndpoint(cfg.Device), probe.IOSVersion, probe.Arch, probe.Model, probe.Jailbreak)
+
+	if err := ensureDeviceSudo(cfg, dev); err != nil {
+		tui.Err("sudo as %s failed: %v", cfg.Device.User, err)
+		return err
+	}
 
 	live = tui.NewLive()
 	live.Spin("patching Info.plist for %s", probe.IOSVersion)

@@ -252,6 +252,27 @@ func (c *Client) RunSudo(cmd string) (string, string, int, error) {
 	return c.RunSudoStream(cmd, nil, nil)
 }
 
+// CheckSudo verifies that sudo works with the stored password, returning
+// ErrSudoPasswordRejected when the password is what it refuses.
+func (c *Client) CheckSudo() error {
+	_, errOut, code, err := c.RunSudo("true")
+	if err != nil {
+		return err
+	}
+
+	if code != 0 {
+		return fmt.Errorf("sudo exit %d: %s", code, strings.TrimSpace(errOut))
+	}
+
+	return nil
+}
+
+// SetSudoPassword replaces the password fed to sudo. With key auth the SSH
+// login carries none, so it has to be supplied separately.
+func (c *Client) SetSudoPassword(password string) {
+	c.cfg.Auth.Password = password
+}
+
 func (c *Client) RunSudoStream(cmd string, stdoutW, stderrW io.Writer) (string, string, int, error) {
 	full := "sudo -S -p '' " + cmd
 
@@ -302,7 +323,8 @@ func (c *Client) RunSudoStream(cmd string, stdoutW, stderrW io.Writer) (string, 
 	}
 
 	if s := seBuf.String(); strings.Contains(s, "incorrect password") ||
-		strings.Contains(s, "try again") {
+		strings.Contains(s, "try again") ||
+		strings.Contains(s, "password is required") {
 		return soBuf.String(), s, exit, ErrSudoPasswordRejected
 	}
 

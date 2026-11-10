@@ -161,6 +161,13 @@ func verifyDeviceDecryptReady(cfg *config.Config) {
 
 	live.OK("connected")
 
+	if err := ensureDeviceSudo(cfg, dev); err != nil {
+		tui.Err("sudo as %s failed: %v", cfg.Device.User, err)
+		tui.Info("the on-device fallback won't work until sudo does; offline decryption is unaffected")
+
+		return
+	}
+
 	missing := 0
 
 	checks := []struct {
