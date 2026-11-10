@@ -29,7 +29,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 
 	if bootstrapReset {
 		cfg.Apple = config.Apple{}
-		cfg.Device = config.Device{Port: 22, User: "root"}
+		cfg.Device = config.Device{Port: 22}
 
 		if err := cfg.Save(); err != nil {
 			tui.Err("reset config: %v", err)
@@ -83,7 +83,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 	} else {
 		tui.Info("This connects once to your jailbroken device to extract a reusable\n16-byte account key. After this, every decrypt runs offline - no device.")
 		tui.Info("Requirements on the device:")
-		tui.Bullet("root SSH (OpenSSH from Sileo), reachable over the network or USB")
+		tui.Bullet("SSH (OpenSSH from Sileo) as root or a sudo user like mobile, reachable over the network or USB")
 		tui.Bullet("at least one App Store app bought with this Apple ID, installed")
 
 		if err := promptMintDevice(cfg); err != nil {
@@ -339,7 +339,7 @@ func promptMintDevice(cfg *config.Config) error {
 	}
 
 	if cfg.Device.User == "" {
-		u, err := tui.PromptDefault("device SSH user (minting needs root)", "root")
+		u, err := tui.PromptDefault("device SSH user (root, or one that can sudo)", "mobile")
 		if err != nil {
 			return err
 		}
@@ -381,6 +381,15 @@ func promptMintDevice(cfg *config.Config) error {
 			}
 
 			cfg.Device.Auth.KeyPassphrase = pass
+		}
+
+		if cfg.Device.Auth.Password == "" && cfg.Device.User != "root" {
+			pw, err := tui.PromptPassword("sudo password (leave empty if not needed)")
+			if err != nil {
+				return err
+			}
+
+			cfg.Device.Auth.Password = pw
 		}
 
 	default:

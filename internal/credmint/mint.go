@@ -1,5 +1,6 @@
 // Package credmint mints the reusable 16-byte FairPlay account credential by
-// orchestrating prebuilt native programs on a jailbroken device over root SSH.
+// orchestrating prebuilt native programs on a jailbroken device over SSH, as
+// root or as a login that can sudo.
 // It is a one-time step; the cached credential then decrypts every app for
 // that Apple account offline. Port of credential-retrieval/retrieve.py.
 package credmint

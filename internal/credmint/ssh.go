@@ -28,13 +28,20 @@ const (
 
 var remoteNameRe = regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
 
-// sshDevice is a slim root-SSH client for credential minting: it pushes the
-// device bundle, runs the native programs, and tears down its temp dirs. It
-// is a Go port of credential-retrieval/native_ssh.py's SSHDevice.
+// sshDevice is a slim SSH client for credential minting: it pushes the
+// device bundle, runs the native programs as root, and tears down its temp
+// dirs. It is a Go port of credential-retrieval/native_ssh.py's SSHDevice,
+// which assumes a root login; any other login is elevated through sudo.
 type sshDevice struct {
-	ssh        *ssh.Client
-	sftp       *sftp.Client
-	tunnel     *exec.Cmd
+	ssh    *ssh.Client
+	sftp   *sftp.Client
+	tunnel *exec.Cmd
+
+	// sudoUser is the SSH login when it isn't root. Its commands then go
+	// through sudo, authenticated with sudoPassword.
+	sudoUser     string
+	sudoPassword string
+
 	ps         string
 	dir        string
 	triggerDir string
@@ -46,6 +53,11 @@ func dial(ctx context.Context, dev config.Device) (*sshDevice, error) {
 	port := dev.Port
 
 	d := &sshDevice{}
+
+	if dev.User != "root" {
+		d.sudoUser = dev.User
+		d.sudoPassword = dev.Auth.Password
+	}
 
 	if dev.USB {
 		if port == 0 {
@@ -244,6 +256,13 @@ func (d *sshDevice) setup() error {
 		return err
 	}
 
+	// The bundle is pushed over SFTP, which runs as the SSH login.
+	if d.sudoUser != "" {
+		if _, err := d.run("chown "+shellQuote(d.sudoUser)+" "+shellQuote(d.dir), nil); err != nil {
+			return err
+		}
+	}
+
 	if _, err := d.run("mkdir -m 755 "+shellQuote(d.triggerDir), nil); err != nil {
 		return err
 	}
@@ -292,6 +311,12 @@ func (d *sshDevice) writeFile(name string, data []byte, executable bool) (string
 }
 
 func (d *sshDevice) readFile(remote string) ([]byte, error) {
+	// SFTP runs as the SSH login, which can't read root-only files (installed
+	// app licenses, the programs' outputs).
+	if d.sudoUser != "" {
+		return d.run("cat "+shellQuote(remote), nil)
+	}
+
 	f, err := d.sftp.Open(remote)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", remote, err)
@@ -302,8 +327,25 @@ func (d *sshDevice) readFile(remote string) ([]byte, error) {
 	return io.ReadAll(f)
 }
 
-// run executes cmd and returns stdout, erroring (with combined output) on a
-// non-zero exit or timeout. Mirrors native_ssh.py SSHDevice.run.
+// asRoot points sess at stdin and returns the command line that runs cmd as
+// root. A root login runs cmd as is; any other login goes through sudo, which
+// reads its password from the first line of stdin.
+func (d *sshDevice) asRoot(sess *ssh.Session, cmd string, stdin []byte) string {
+	if d.sudoUser == "" {
+		if stdin != nil {
+			sess.Stdin = bytes.NewReader(stdin)
+		}
+
+		return cmd
+	}
+
+	sess.Stdin = io.MultiReader(strings.NewReader(d.sudoPassword+"\n"), bytes.NewReader(stdin))
+
+	return "sudo -S -p '' sh -c " + shellQuote(cmd)
+}
+
+// run executes cmd as root and returns stdout, erroring (with combined
+// output) on a non-zero exit or timeout. Mirrors native_ssh.py SSHDevice.run.
 func (d *sshDevice) run(cmd string, stdin []byte) ([]byte, error) {
 	sess, err := d.ssh.NewSession()
 	if err != nil {
@@ -317,13 +359,11 @@ func (d *sshDevice) run(cmd string, stdin []byte) ([]byte, error) {
 	sess.Stdout = &out
 	sess.Stderr = &errBuf
 
-	if stdin != nil {
-		sess.Stdin = bytes.NewReader(stdin)
-	}
+	line := d.asRoot(sess, cmd, stdin)
 
 	done := make(chan error, 1)
 
-	go func() { done <- sess.Run(cmd) }()
+	go func() { done <- sess.Run(line) }()
 
 	select {
 	case err := <-done:
@@ -341,9 +381,9 @@ func (d *sshDevice) run(cmd string, stdin []byte) ([]byte, error) {
 	}
 }
 
-// runCode executes cmd and reports its exit code without treating a non-zero
-// exit as an error (transport failures and the timeout still error). Used for
-// the trigger, whose exit code 3 selects a fallback launch path.
+// runCode executes cmd as root and reports its exit code without treating a
+// non-zero exit as an error (transport failures and the timeout still error).
+// Used for the trigger, whose exit code 3 selects a fallback launch path.
 func (d *sshDevice) runCode(cmd string, timeout time.Duration) (stdout, stderr []byte, code int, err error) {
 	sess, err := d.ssh.NewSession()
 	if err != nil {
@@ -357,9 +397,11 @@ func (d *sshDevice) runCode(cmd string, timeout time.Duration) (stdout, stderr [
 	sess.Stdout = &out
 	sess.Stderr = &errBuf
 
+	line := d.asRoot(sess, cmd, nil)
+
 	done := make(chan error, 1)
 
-	go func() { done <- sess.Run(cmd) }()
+	go func() { done <- sess.Run(line) }()
 
 	select {
 	case runErr := <-done:
@@ -435,7 +477,7 @@ func (d *sshDevice) start(cmd, readyMarker string) (*remoteCmd, error) {
 		stderr: &syncBuffer{},
 	}
 
-	if err := sess.Start(cmd); err != nil {
+	if err := sess.Start(d.asRoot(sess, cmd, nil)); err != nil {
 		sess.Close()
 		return nil, fmt.Errorf("start %s: %w", cmd, err)
 	}
