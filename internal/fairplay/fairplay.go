@@ -24,48 +24,16 @@ const (
 )
 
 var (
-	workMask    = mustHex("c7626110cecd15963d850f6605f11c4b")
-	constant    = mustHex("b4f27cb84eaaff3c1309be4089f02972")
-	contextBase = uint64(0x3E4A45B664EBA141)
-
-	roundSelectors = [4][8]byte{
-		{0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d},
-		{0x38, 0x37, 0x36, 0x39, 0x3a, 0x3d, 0x3c, 0x3b},
-		{0x38, 0x36, 0x3a, 0x37, 0x3c, 0x39, 0x3d, 0x3b},
-		{0x37, 0x38, 0x3a, 0x36, 0x3d, 0x39, 0x3b, 0x3c},
+	roundSelectors = [4][4][2]int{
+		{{0, 1}, {2, 3}, {4, 5}, {6, 7}},
+		{{2, 1}, {0, 3}, {4, 7}, {6, 5}},
+		{{2, 0}, {4, 1}, {6, 3}, {7, 5}},
+		{{1, 2}, {4, 0}, {7, 3}, {5, 6}},
 	}
-	roundConstants = [4]uint32{0x6EE6B74F, 0x78B72ABF, 0xD227C8EA, 0x0C0081BC}
+	roundConstants = [4]uint32{0x68547C2E, 0x7E05E1DE, 0xD495038B, 0x0AB24ADD}
 	finalSelectors = [4][4]int{{0, 1, 2, 3}, {0, 2, 4, 6}, {0, 3, 5, 7}, {4, 5, 6, 7}}
-	finalConstants = [4]uint64{
-		0x4F3DAC1FD3361949,
-		0x4F3DAC1F631A63A2,
-		0x4F3DAC1F87CD2974,
-		0x4F3DAC1F7EA63AB1,
-	}
+	finalConstants = [4]uint32{0x5B7198C7, 0xEB5DE22C, 0x0F8AA8FA, 0xF6E1BB3F}
 )
-
-func mustHex(s string) []byte {
-	b := make([]byte, len(s)/2)
-	for i := range b {
-		var v byte
-
-		for j := range 2 {
-			c := s[i*2+j]
-			switch {
-			case c >= '0' && c <= '9':
-				v = v<<4 | (c - '0')
-			case c >= 'a' && c <= 'f':
-				v = v<<4 | (c - 'a' + 10)
-			default:
-				panic("invalid hex literal")
-			}
-		}
-
-		b[i] = v
-	}
-
-	return b
-}
 
 func xorBytes(a, b []byte) []byte {
 	if len(a) != len(b) {
@@ -85,18 +53,36 @@ func xorBytes(a, b []byte) []byte {
 type machoInfo struct {
 	base          int
 	size          int
+	subtype       uint32
 	cryptOff      int
 	cryptSize     int
 	cryptidOffset int
 }
 
-// arm64EncryptionInfo parses the Mach-O header(s) and returns the single
-// encrypted arm64 slice's region. It mirrors core.py arm64_encryption_info,
-// except that arm64e fat siblings are ignored: only the plain arm64 SUPF
-// records are supported (see arm64SupfRecordOffset), and the output is thinned
-// to that slice anyway.
+type arm64Slice struct {
+	base, size int
+	subtype    uint32
+}
+
+// arm64EncryptionInfo parses the Mach-O header(s) and returns the encrypted
+// region of the arm64 slice the output is thinned to: the plain arm64 slice,
+// or the arm64e one when there is none. It mirrors core.py
+// arm64_encryption_infos, which decrypts every arm64 slice in place instead.
+// errNotEncrypted reports a slice with no active encryption command.
 func arm64EncryptionInfo(data []byte) (machoInfo, error) {
-	var base, sliceSize int
+	var plain, arm64e []arm64Slice
+
+	addSlice := func(cpu, sub uint32, base, size int) {
+		if cpu != cpuTypeARM64 {
+			return
+		}
+
+		if sub&cpuSubtypeMask == cpuSubtypeARM64E {
+			arm64e = append(arm64e, arm64Slice{base, size, sub})
+		} else {
+			plain = append(plain, arm64Slice{base, size, sub})
+		}
+	}
 
 	switch {
 	case len(data) >= 4 && data[0] == 0xca && data[1] == 0xfe && data[2] == 0xba && data[3] == 0xbe:
@@ -105,23 +91,10 @@ func arm64EncryptionInfo(data []byte) (machoInfo, error) {
 			return machoInfo{}, errors.New("invalid FAT32 architecture table")
 		}
 
-		found := 0
-
 		for i := range count {
 			off := 8 + i*20
-			cpu := binary.BigEndian.Uint32(data[off:])
-			sub := binary.BigEndian.Uint32(data[off+4:])
-			sliceOff := int(binary.BigEndian.Uint32(data[off+8:]))
-
-			size := int(binary.BigEndian.Uint32(data[off+12:]))
-			if cpu == cpuTypeARM64 && sub&cpuSubtypeMask != cpuSubtypeARM64E {
-				base, sliceSize = sliceOff, size
-				found++
-			}
-		}
-
-		if found != 1 {
-			return machoInfo{}, fmt.Errorf("expected one arm64 slice, found %d", found)
+			addSlice(binary.BigEndian.Uint32(data[off:]), binary.BigEndian.Uint32(data[off+4:]),
+				int(binary.BigEndian.Uint32(data[off+8:])), int(binary.BigEndian.Uint32(data[off+12:])))
 		}
 	case len(data) >= 4 && data[0] == 0xca && data[1] == 0xfe && data[2] == 0xba && data[3] == 0xbf:
 		count := int(binary.BigEndian.Uint32(data[4:]))
@@ -129,29 +102,27 @@ func arm64EncryptionInfo(data []byte) (machoInfo, error) {
 			return machoInfo{}, errors.New("invalid FAT64 architecture table")
 		}
 
-		found := 0
-
 		for i := range count {
 			off := 8 + i*32
-			cpu := binary.BigEndian.Uint32(data[off:])
-			sub := binary.BigEndian.Uint32(data[off+4:])
-			sliceOff := int(binary.BigEndian.Uint64(data[off+8:]))
-
-			size := int(binary.BigEndian.Uint64(data[off+16:]))
-			if cpu == cpuTypeARM64 && sub&cpuSubtypeMask != cpuSubtypeARM64E {
-				base, sliceSize = sliceOff, size
-				found++
-			}
+			addSlice(binary.BigEndian.Uint32(data[off:]), binary.BigEndian.Uint32(data[off+4:]),
+				int(binary.BigEndian.Uint64(data[off+8:])), int(binary.BigEndian.Uint64(data[off+16:])))
 		}
-
-		if found != 1 {
-			return machoInfo{}, fmt.Errorf("expected one arm64 slice, found %d", found)
-		}
-	case len(data) >= 4 && data[0] == 0xcf && data[1] == 0xfa && data[2] == 0xed && data[3] == 0xfe:
-		base, sliceSize = 0, len(data)
+	case len(data) >= 32 && data[0] == 0xcf && data[1] == 0xfa && data[2] == 0xed && data[3] == 0xfe:
+		addSlice(binary.LittleEndian.Uint32(data[4:]), binary.LittleEndian.Uint32(data[8:]), 0, len(data))
 	default:
 		return machoInfo{}, errors.New("not a supported arm64 Mach-O")
 	}
+
+	slices := plain
+	if len(slices) == 0 {
+		slices = arm64e
+	}
+
+	if len(slices) != 1 {
+		return machoInfo{}, fmt.Errorf("expected one arm64 slice, found %d", len(slices))
+	}
+
+	base, sliceSize := slices[0].base, slices[0].size
 
 	if base+sliceSize > len(data) || base+32 > len(data) {
 		return machoInfo{}, errors.New("arm64 slice exceeds file")
@@ -205,12 +176,16 @@ func arm64EncryptionInfo(data []byte) (machoInfo, error) {
 		pos += size
 	}
 
-	if found != 1 {
-		return machoInfo{}, fmt.Errorf("expected one encryption command, found %d", found)
+	if pos != commandsEnd {
+		return machoInfo{}, errors.New("load command sizes do not match Mach-O header")
 	}
 
-	if cryptid == 0 {
-		return machoInfo{}, errCryptidZero
+	if found == 0 || (found == 1 && cryptid == 0) {
+		return machoInfo{}, errNotEncrypted
+	}
+
+	if found != 1 {
+		return machoInfo{}, fmt.Errorf("expected one encryption command, found %d", found)
 	}
 
 	if cryptid != 1 || cryptSize == 0 || cryptSize%pageSize != 0 {
@@ -221,11 +196,15 @@ func arm64EncryptionInfo(data []byte) (machoInfo, error) {
 		return machoInfo{}, errors.New("invalid encrypted region bounds")
 	}
 
-	return machoInfo{base: base, size: sliceSize, cryptOff: cryptOff, cryptSize: cryptSize, cryptidOffset: cryptidOffset}, nil
+	return machoInfo{
+		base: base, size: sliceSize, subtype: slices[0].subtype,
+		cryptOff: cryptOff, cryptSize: cryptSize, cryptidOffset: cryptidOffset,
+	}, nil
 }
 
-// errCryptidZero reports a slice whose cryptid is already 0 (not encrypted).
-var errCryptidZero = errors.New("cryptid is zero")
+// errNotEncrypted reports an arm64 slice that has no encryption command or
+// whose cryptid is already 0.
+var errNotEncrypted = errors.New("arm64 slice is not encrypted")
 
 type atom struct {
 	tag        [4]byte
@@ -363,12 +342,27 @@ func deriveWork16(credential, sinf []byte) ([]byte, error) {
 		return nil, errors.New("credential does not decode this SINF priv record")
 	}
 
-	return xorBytes(clear[24:40], workMask), nil
+	return clear[24:40], nil
 }
 
-// arm64SupfRecordOffset locates the arm64 per-page record block in a SUPF.
-// Mirrors core.py arm64_supf_record_offset.
-func arm64SupfRecordOffset(supf []byte, requiredPages int) (int, error) {
+// isArcadeSinf reports whether sinf is an Apple Arcade license, which only the
+// account's Arcade credential decodes. Mirrors retrieve.py's key[0] == 4 check.
+func isArcadeSinf(sinf []byte) bool {
+	key, err := sinfField(sinf, "key ")
+	return err == nil && len(key) == 4 && key[0] == 4
+}
+
+// CredentialDecodes reports whether credential unwraps sinf's priv record, i.e.
+// whether it is the credential of that license's account and kind.
+func CredentialDecodes(credential, sinf []byte) bool {
+	_, err := deriveWork16(credential, sinf)
+	return err == nil
+}
+
+// arm64SupfRecordOffset locates the per-page record block of the arm64 slice
+// with the given subtype in a SUPF. Mirrors core.py arm64_supf_record_offset,
+// but compares subtypes without their capability bits.
+func arm64SupfRecordOffset(supf []byte, requiredPages int, wantedSubtype uint32) (int, error) {
 	if len(supf) < 12 || (supf[0] != 3 && supf[0] != 5) {
 		return 0, errors.New("unsupported SUPF format")
 	}
@@ -403,7 +397,7 @@ func arm64SupfRecordOffset(supf []byte, requiredPages int) (int, error) {
 		}
 
 		pages := int(binary.BigEndian.Uint32(supf[pos+headerSize:]))
-		if cpu == cpuTypeARM64 && subtype == 0 {
+		if cpu == cpuTypeARM64 && subtype&cpuSubtypeMask == wantedSubtype&cpuSubtypeMask {
 			if pages < requiredPages || length < headerSize+pages*32 {
 				return 0, errors.New("SUPF arm64 page records are incomplete")
 			}
@@ -417,97 +411,68 @@ func arm64SupfRecordOffset(supf []byte, requiredPages int) (int, error) {
 	return 0, errors.New("arm64 SUPF record missing")
 }
 
-func highByteFromContextWord(word uint64) []byte {
-	var b [8]byte
-	binary.BigEndian.PutUint64(b[:], word^0x2D43FBF6ED1B8833)
-
-	return b[:]
-}
-
 func sourceBlocks(wrapped []byte, absoluteIndex uint32) ([16]byte, [16]byte, [16]byte, error) {
 	if len(wrapped) != 16 {
 		return [16]byte{}, [16]byte{}, [16]byte{}, errors.New("invalid wrapped record")
 	}
 
-	context := contextBase ^ (uint64(absoluteIndex) << 12)
+	var pageOffset [8]byte
+	binary.BigEndian.PutUint64(pageOffset[:], uint64(absoluteIndex)<<12)
 
 	var first, second, third [16]byte
 
-	copy(first[:8], xorBytes(wrapped[8:16], constant[:8]))
-	copy(first[8:], highByteFromContextWord(context))
+	copy(first[:8], wrapped[8:16])
+	copy(first[8:], pageOffset[:])
 
-	copy(second[:], xorBytes(wrapped, constant))
+	copy(second[:], wrapped)
 
-	thirdHigh := binary.BigEndian.Uint64(constant[:8]) ^ (uint64(absoluteIndex) << 12)
-	binary.BigEndian.PutUint64(third[:8], thirdHigh)
-	copy(third[8:], xorBytes(wrapped[:8], constant[8:]))
+	copy(third[:8], pageOffset[:])
+	copy(third[8:], wrapped[:8])
 
 	return first, second, third, nil
 }
 
-func mixRound(before [8]uint32, selectors [8]byte) [8]uint32 {
-	var out [8]uint32
-
-	for pair := range 4 {
-		a := before[selectors[pair*2]-0x36] ^ 0x18FB
-		b := before[selectors[pair*2+1]-0x36] ^ 0x18FB
-		mixed := a + b
-		square := (mixed*mixed ^ roundConstants[pair])
-		high := (mixed >> 16) & 0xFFFF
-		low := ((0xCB61 - high*high) ^ square) & 0xFFFF
-		out[pair*2] = low ^ 0x18FB
-		out[pair*2+1] = (square >> 16) ^ 0x1E49
-	}
-
-	return out
-}
-
+// finish mixes a block as eight big-endian 16-bit words: four rounds over
+// word pairs, then one over 32-bit word quartets, XORed back onto the input.
+// Mirrors core.py finish.
 func finish(state [16]byte) [16]byte {
 	var initial [8]uint32
 	for i := range 8 {
-		initial[i] = uint32(binary.BigEndian.Uint16(state[i*2:])) ^ 0x18FB
+		initial[i] = uint32(binary.BigEndian.Uint16(state[i*2:]))
 	}
 
-	row := initial
+	src := initial
+
 	for _, selectors := range roundSelectors {
-		row = mixRound(row, selectors)
-	}
+		var dst [8]uint32
 
-	var final [8]uint32
-
-	for j, selectors := range finalSelectors {
-		var decoded [4]uint32
-		for i, sel := range selectors {
-			decoded[i] = row[sel] ^ 0x18FB
+		for i, pair := range selectors {
+			mixed := src[pair[0]] + src[pair[1]] // carry bit kept
+			x := mixed*mixed ^ mixed>>16 ^ roundConstants[i]
+			dst[i*2], dst[i*2+1] = x&0xFFFF, x>>16
 		}
 
-		left := uint64(decoded[0]) | uint64(decoded[1])<<16
-		right := uint64(decoded[2]) | uint64(decoded[3])<<16
-		x9 := (left + right) & 0xFFFFFFFF
-		x9 *= x9
-		x9 ^= 0x4F3DAC1F8847818E
-		x19 := finalConstants[j] ^ x9
-		x9 = x19 ^ (x9 >> 32)
-		low := (x9 ^ 0xB4E4) & 0xFFFF
-		high := ((x9 >> 16) ^ 0x4F3D ^ 0x18FB) & 0xFFFF
-		final[j*2] = uint32(low)
-		final[j*2+1] = uint32(high)
+		src = dst
 	}
 
 	var out [16]byte
-	for i := range 8 {
-		binary.BigEndian.PutUint16(out[i*2:], uint16(initial[i]^final[i]))
+
+	for i, quartet := range finalSelectors {
+		mixed := (src[quartet[1]]<<16 | src[quartet[0]]) + (src[quartet[3]]<<16 | src[quartet[2]]) // carry bit dropped
+		square := uint64(mixed) * uint64(mixed)
+		x := uint32(square) ^ uint32(square>>32) ^ finalConstants[i]
+		binary.BigEndian.PutUint16(out[i*4:], uint16(initial[i*2]^x&0xFFFF))
+		binary.BigEndian.PutUint16(out[i*4+2:], uint16(initial[i*2+1]^x>>16))
 	}
 
 	return out
 }
 
 // blockTransform is the per-page key primitive: an AES-128-ECB encryption of
-// source^CONSTANT under the work-derived key. The former 223 KB white-box table
-// computed exactly this. Mirrors core.py block_transform.
+// source under the work key. Mirrors core.py block_transform.
 func blockTransform(block cipher.Block, source [16]byte) [16]byte {
 	var out [16]byte
-	block.Encrypt(out[:], xorBytes(source[:], constant))
+	block.Encrypt(out[:], source[:])
 
 	return out
 }
@@ -537,12 +502,12 @@ func xor16(a [16]byte, b [16]byte) [16]byte {
 	return out
 }
 
-// decryptBinary decrypts every encrypted arm64 page of a Mach-O and clears
-// cryptid. Mirrors core.py decrypt_binary, except that a fat binary is thinned
-// to its arm64 slice: the sibling slices (armv7, arm64e) stay FairPlay-encrypted
-// and can't be decrypted offline, so they are dropped like the on-device
-// helper does. Returns the decrypted thin Mach-O and the number of pages processed;
-// errCryptidZero if the slice is not encrypted.
+// decryptBinary decrypts every encrypted page of a Mach-O's arm64 slice and
+// clears cryptid. Mirrors core.py decrypt_binary, except that a fat binary is
+// thinned to that one slice (see arm64EncryptionInfo): the others (armv7, and
+// arm64e next to a plain arm64 slice) are dropped like the on-device helper
+// does. Returns the decrypted thin Mach-O and the number of pages processed;
+// errNotEncrypted if the slice is not encrypted.
 func decryptBinary(source, sinf, supf, credential []byte) ([]byte, int, error) {
 	info, err := arm64EncryptionInfo(source)
 	if err != nil {
@@ -551,7 +516,7 @@ func decryptBinary(source, sinf, supf, credential []byte) ([]byte, int, error) {
 
 	pageCount := info.cryptSize / pageSize
 
-	recordStart, err := arm64SupfRecordOffset(supf, pageCount)
+	recordStart, err := arm64SupfRecordOffset(supf, pageCount, info.subtype)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -561,7 +526,7 @@ func decryptBinary(source, sinf, supf, credential []byte) ([]byte, int, error) {
 		return nil, 0, err
 	}
 
-	keyCipher, err := aes.NewCipher(xorBytes(work, workMask))
+	keyCipher, err := aes.NewCipher(work)
 	if err != nil {
 		return nil, 0, err
 	}

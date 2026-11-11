@@ -16,7 +16,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 bundle_dst="$here/../bundle"
 
 FP_REPO="https://github.com/EthanArbuckle/fairplay-decrypt"
-FP_COMMIT="7f80db2ef37634073fab06b3aad1aa0cf24561a1"
+FP_COMMIT="d81d98b13656c9dbb340f04dd0838137278f44a5"
 
 if ! command -v docker >/dev/null 2>&1; then
     echo "docker is required" >&2
@@ -72,7 +72,7 @@ else
 fi
 
 # --- compile + sign in the container --------------------------------------
-echo "==> compiling credential.ios / driver.ios / trigger.ios"
+echo "==> compiling credential.ios / driver.ios / trigger.ios / arcade-capture.ios"
 docker run --rm --platform linux/amd64 \
     -v "$src:/src:ro" -v "$bundle_dst:/out" \
     "$IMAGE" /bin/sh -c '
@@ -102,6 +102,11 @@ docker run --rm --platform linux/amd64 \
         clang $common -std=c11 /src/trigger/trigger.c -o /out/trigger.ios
         ldid -S/src/trigger/trigger.entitlements.plist /out/trigger.ios
 
+        # shellcheck disable=SC2086
+        clang $common -std=c11 /src/arcade-capture/arcade_capture.c /src/credential/observer.c \
+            -framework IOKit -o /out/arcade-capture.ios
+        ldid -S/src/arcade-capture/arcade-capture.entitlements.plist /out/arcade-capture.ios
+
         cp /src/credential/static-key-table.bin /out/static-key-table.bin
         cp /src/credential/core4-word-table.bin /out/core4-word-table.bin
     '
@@ -110,7 +115,7 @@ docker run --rm --platform linux/amd64 \
 rm -rf "$staged"
 
 # --- sanity: no placeholders left -----------------------------------------
-for f in credential.ios driver.ios trigger.ios; do
+for f in credential.ios driver.ios trigger.ios arcade-capture.ios; do
     if head -c 31 "$bundle_dst/$f" | grep -q 'IPADECRYPT_CREDMINT_PLACEHOLDER'; then
         echo "error: $f is still a placeholder after build" >&2
         exit 1

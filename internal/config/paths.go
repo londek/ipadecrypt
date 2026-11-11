@@ -64,9 +64,10 @@ func (p *Paths) VersionsCacheFile(bundleID string) (string, error) {
 }
 
 // CredentialPath returns the on-disk path of the cached 16-byte FairPlay
-// credential for the given account DSID. The DSID is sanitized to a bare
-// token so it can never escape the credentials directory.
-func (p *Paths) CredentialPath(dsid string) (string, error) {
+// credential for the given account DSID; arcade selects the account's Apple
+// Arcade credential. The DSID is sanitized to a bare token so it can never
+// escape the credentials directory.
+func (p *Paths) CredentialPath(dsid string, arcade bool) (string, error) {
 	token := sanitizeDSID(dsid)
 	if token == "" {
 		return "", fmt.Errorf("invalid account identifier %q", dsid)
@@ -75,6 +76,10 @@ func (p *Paths) CredentialPath(dsid string) (string, error) {
 	dir, err := p.ensure(filepath.Join(p.Root, "credentials"))
 	if err != nil {
 		return "", err
+	}
+
+	if arcade {
+		return filepath.Join(dir, token+".arcade.bin"), nil
 	}
 
 	return filepath.Join(dir, token+".bin"), nil

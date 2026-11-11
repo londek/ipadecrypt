@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"path"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,15 +21,24 @@ import (
 	"howett.net/plist"
 )
 
-const credentialSize = 16
+const (
+	credentialSize = 16
 
-var fairplaydRe = regexp.MustCompile(`^fairplayd(?:\.[AH][0-9]+)?$`)
+	// sidoPath is the FairPlay file arcade-capture.ios looks for in fairplayd's
+	// IOKit calls. Mirrors retrieve.py SIDO_PATH.
+	sidoPath = "/private/var/mobile/Library/FairPlay/iTunes_Control/iTunes/IC-Info.sido"
+)
+
+// ErrNoArcadeApp reports that the device has no Apple Arcade app from the
+// account installed, so its Arcade credential can't be minted.
+var ErrNoArcadeApp = errors.New("no installed Apple Arcade app has a supported license for this Apple ID")
 
 // Mint connects to the jailbroken device described by dev, runs the FairPlay
-// credential retriever, and returns the 16-byte account credential. The
-// device must be signed into the same Apple account and have at least one
-// owned App Store app installed.
-func Mint(ctx context.Context, dev config.Device, dsid string) ([]byte, error) {
+// credential retriever, and returns a 16-byte account credential: the regular
+// one, or with arcade the one that decrypts Apple Arcade apps. The device must
+// be signed into the same Apple account and have at least one owned App Store
+// app (with arcade, an Arcade app) installed.
+func Mint(ctx context.Context, dev config.Device, dsid string, arcade bool) ([]byte, error) {
 	files, err := bundleFiles()
 	if err != nil {
 		return nil, err
@@ -75,7 +83,7 @@ func Mint(ctx context.Context, dev config.Device, dsid string) ([]byte, error) {
 		}
 	}
 
-	installedApp, executable, installedSinf, err := triggerApp(d, accountFilter)
+	installedApp, executable, installedSinf, err := triggerApp(d, accountFilter, arcade)
 	if err != nil {
 		return nil, err
 	}
@@ -84,21 +92,28 @@ func Mint(ctx context.Context, dev config.Device, dsid string) ([]byte, error) {
 		return nil, fmt.Errorf("installed license: %w", err)
 	}
 
+	var daemonImage []byte
+
+	if arcade {
+		daemonImage, err = fairplaydImage(d)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	licensePath, err := d.writeFile("license.sinf", installedSinf, false)
 	if err != nil {
 		return nil, err
 	}
+
+	installedExecutable := installedApp + "/" + executable
+	stopRemote(d, installedExecutable)
 
 	if _, err := d.run("cp -R "+shellQuote(installedApp)+" "+shellQuote(d.triggerDir), nil); err != nil {
 		return nil, fmt.Errorf("stage trigger app: %w", err)
 	}
 
 	uniqueExecutable := d.triggerDir + "/" + path.Base(installedApp) + "/" + executable
-
-	uidLayerPath, err := d.path("uid-layer.bin")
-	if err != nil {
-		return nil, err
-	}
 
 	triggerProgram, err := d.path("trigger.ios")
 	if err != nil {
@@ -110,7 +125,34 @@ func Mint(ctx context.Context, dev config.Device, dsid string) ([]byte, error) {
 		return nil, err
 	}
 
-	if err := observeUIDLayer(d, program, newPID, uidLayerPath, triggerProgram, uniqueExecutable); err != nil {
+	var credential []byte
+
+	if arcade {
+		credential, err = captureArcadeCredential(d, newPID, triggerProgram, uniqueExecutable, installedExecutable, installedSinf, daemonImage)
+	} else {
+		credential, err = retrieveCredential(d, program, newPID, licensePath, triggerProgram, uniqueExecutable, installedExecutable)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	if len(credential) != credentialSize {
+		return nil, fmt.Errorf("device returned a %d-byte credential, expected %d", len(credential), credentialSize)
+	}
+
+	return credential, nil
+}
+
+// retrieveCredential observes fairplayd's uid-layer while the trigger app
+// launches, then derives the regular credential from it on the device.
+func retrieveCredential(d *sshDevice, program string, pid int, licensePath, triggerProgram, executable, installedExecutable string) ([]byte, error) {
+	uidLayerPath, err := d.path("uid-layer.bin")
+	if err != nil {
+		return nil, err
+	}
+
+	if err := observeUIDLayer(d, program, pid, uidLayerPath, triggerProgram, executable, installedExecutable, ""); err != nil {
 		return nil, err
 	}
 
@@ -127,16 +169,37 @@ func Mint(ctx context.Context, dev config.Device, dsid string) ([]byte, error) {
 		return nil, fmt.Errorf("retrieve credential: %w", err)
 	}
 
-	credential, err := d.readFile(credentialPath)
+	return d.readFile(credentialPath)
+}
+
+// captureArcadeCredential snapshots the FairPlay buffers fairplayd writes
+// while the Arcade trigger app launches, then recovers the Arcade credential
+// from them on the host.
+func captureArcadeCredential(d *sshDevice, pid int, triggerProgram, executable, installedExecutable string, sinf, daemonImage []byte) ([]byte, error) {
+	program, err := d.path("arcade-capture.ios")
 	if err != nil {
 		return nil, err
 	}
 
-	if len(credential) != credentialSize {
-		return nil, fmt.Errorf("device returned a %d-byte credential, expected %d", len(credential), credentialSize)
+	prefix, err := d.path("arcade")
+	if err != nil {
+		return nil, err
 	}
 
-	return credential, nil
+	if err := observeUIDLayer(d, program, pid, prefix, triggerProgram, executable, installedExecutable, sidoPath); err != nil {
+		return nil, err
+	}
+
+	blocks := make([][]byte, 3)
+
+	for i := range blocks {
+		blocks[i], err = d.readFile(prefix + ".block" + strconv.Itoa(i+1))
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return arcadeCredential(blocks, sinf, daemonImage)
 }
 
 func verifyDevice(d *sshDevice, program, udid string) error {
@@ -173,8 +236,10 @@ func verifyDevice(d *sshDevice, program, udid string) error {
 // triggerApp finds the first installed App Store app with a supported license
 // and returns its bundle path, main executable name, and license bytes.
 // accountFilter, when set, is the SINF "user" atom (the low 32 bits of the
-// account DSID) a license must carry. Mirrors retrieve.py trigger_app.
-func triggerApp(d *sshDevice, accountFilter []byte) (bundle, executable string, sinf []byte, err error) {
+// account DSID) a license must carry; arcade picks an Apple Arcade license
+// (SINF "key " atom starting with 4) instead of a regular one, as each needs
+// its own minting path. Mirrors retrieve.py trigger_app.
+func triggerApp(d *sshDevice, accountFilter []byte, arcade bool) (bundle, executable string, sinf []byte, err error) {
 	listing, err := d.run("find /var/containers/Bundle/Application -type f -path '*/SC_Info/*.sinf' -print0", nil)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("scan installed apps: %w", err)
@@ -217,6 +282,10 @@ func triggerApp(d *sshDevice, accountFilter []byte) (bundle, executable string, 
 			}
 		}
 
+		if key, _ := sinfField(installedSinf, "key "); (key[0] == 4) != arcade {
+			continue
+		}
+
 		infoData, err := d.readFile(appBundle + "/Info.plist")
 		if err != nil {
 			continue
@@ -249,6 +318,10 @@ func triggerApp(d *sshDevice, accountFilter []byte) (bundle, executable string, 
 		return fallbackBundle, fallbackExec, fallbackSinf, nil
 	}
 
+	if arcade {
+		return "", "", nil, ErrNoArcadeApp
+	}
+
 	if len(accountFilter) == 4 {
 		return "", "", nil, errors.New("no installed App Store app has a supported license for this Apple ID; please install an app from the App Store using this Apple ID and retry")
 	}
@@ -256,26 +329,58 @@ func triggerApp(d *sshDevice, accountFilter []byte) (bundle, executable string, 
 	return "", "", nil, errors.New("no installed App Store app has a supported license; install an app bought with this Apple ID and retry")
 }
 
-func fairplaydPID(d *sshDevice) (int, error) {
+// fairplaydProcess returns the pid and executable path of the one running
+// fairplayd (any fairplayd.* variant). Mirrors retrieve.py fairplayd_process.
+func fairplaydProcess(d *sshDevice) (int, string, error) {
 	listing, err := d.processes()
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 
-	var pids []int
+	var (
+		pids  []int
+		comms []string
+	)
 
 	for _, line := range strings.Split(string(listing), "\n") {
 		pid, comm, ok := splitProcessLine(line)
-		if ok && fairplaydRe.MatchString(path.Base(comm)) {
+		if ok && strings.SplitN(path.Base(comm), ".", 2)[0] == "fairplayd" {
 			pids = append(pids, pid)
+			comms = append(comms, comm)
 		}
 	}
 
 	if len(pids) != 1 {
-		return 0, fmt.Errorf("expected one fairplayd process, found %d", len(pids))
+		return 0, "", fmt.Errorf("expected one fairplayd process, found %d", len(pids))
 	}
 
-	return pids[0], nil
+	return pids[0], comms[0], nil
+}
+
+func fairplaydPID(d *sshDevice) (int, error) {
+	pid, _, err := fairplaydProcess(d)
+	return pid, err
+}
+
+// fairplaydImage reads the running fairplayd executable, which holds the
+// tables the Arcade credential search needs. Mirrors retrieve.py
+// fairplayd_image.
+func fairplaydImage(d *sshDevice) ([]byte, error) {
+	_, comm, err := fairplaydProcess(d)
+	if err != nil {
+		return nil, err
+	}
+
+	if !strings.HasPrefix(comm, "/") {
+		comm = "/usr/sbin/" + path.Base(comm)
+	}
+
+	image, err := d.readFile(comm)
+	if err != nil {
+		return nil, fmt.Errorf("read fairplayd: %w", err)
+	}
+
+	return image, nil
 }
 
 func restartFairplayd(d *sshDevice) (int, error) {
@@ -330,15 +435,19 @@ func stopRemote(d *sshDevice, executable string) {
 }
 
 // observeUIDLayer starts the observer, fires the trigger once it is ready,
-// and waits for the observer to capture the uid-layer. Mirrors retrieve.py
-// observe_uid_layer, including the exit-code-3 direct-launch fallback.
-func observeUIDLayer(d *sshDevice, program string, pid int, output, triggerProgram, executable string) (err error) {
-	command := strings.Join([]string{
-		d.credentialCommand(program), "observe-uid-layer",
-		strconv.Itoa(pid), shellQuote(output), "90",
-	}, " ")
+// and waits for the observer to capture the uid-layer. With sido set the
+// observer is arcade-capture.ios, which writes the Arcade buffer snapshots to
+// output.block1-3 instead. Mirrors retrieve.py observe_uid_layer, including the
+// exit-code-3 direct-launch fallback.
+func observeUIDLayer(d *sshDevice, program string, pid int, output, triggerProgram, executable, installedExecutable, sido string) (err error) {
+	args := []string{"observe-uid-layer", strconv.Itoa(pid), shellQuote(output), "90"}
+	if sido != "" {
+		args = []string{strconv.Itoa(pid), shellQuote(sido), shellQuote(output), "90"}
+	}
 
-	observer, err := d.start(command, "observing FairPlay requests")
+	command := d.credentialCommand(program) + " " + strings.Join(args, " ")
+
+	observer, err := d.start(command, "observing FairPlay ")
 	if err != nil {
 		return err
 	}
@@ -347,6 +456,7 @@ func observeUIDLayer(d *sshDevice, program string, pid int, output, triggerProgr
 
 	defer func() {
 		stopRemote(d, triggerProgram)
+		stopRemote(d, installedExecutable)
 
 		if direct != nil {
 			stopRemote(d, executable)

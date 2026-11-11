@@ -9,9 +9,9 @@ import (
 )
 
 // loadCachedCredential reads the 16-byte FairPlay credential cached for the
-// given account DSID.
-func loadCachedCredential(paths *config.Paths, dsid string) ([]byte, error) {
-	path, err := paths.CredentialPath(dsid)
+// given account DSID; arcade selects its Apple Arcade credential.
+func loadCachedCredential(paths *config.Paths, dsid string, arcade bool) ([]byte, error) {
+	path, err := paths.CredentialPath(dsid, arcade)
 	if err != nil {
 		return nil, err
 	}
@@ -20,8 +20,8 @@ func loadCachedCredential(paths *config.Paths, dsid string) ([]byte, error) {
 }
 
 // credentialCached reports whether a credential is already cached for dsid.
-func credentialCached(paths *config.Paths, dsid string) bool {
-	path, err := paths.CredentialPath(dsid)
+func credentialCached(paths *config.Paths, dsid string, arcade bool) bool {
+	path, err := paths.CredentialPath(dsid, arcade)
 	if err != nil {
 		return false
 	}
@@ -32,12 +32,12 @@ func credentialCached(paths *config.Paths, dsid string) bool {
 }
 
 // saveCredential writes the credential for dsid atomically with 0600 perms.
-func saveCredential(paths *config.Paths, dsid string, credential []byte) error {
+func saveCredential(paths *config.Paths, dsid string, arcade bool, credential []byte) error {
 	if err := fairplay.ValidateCredential(credential); err != nil {
 		return err
 	}
 
-	path, err := paths.CredentialPath(dsid)
+	path, err := paths.CredentialPath(dsid, arcade)
 	if err != nil {
 		return err
 	}

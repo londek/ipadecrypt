@@ -28,7 +28,10 @@ offline.
 
 The offline decryptor handles **arm64** slices (everything the modern App Store
 ships). Old builds that still ship a **32-bit (armv7) slice** are thinned to
-their arm64 slice - the 32-bit slice is dropped from the output. If an app
+their arm64 slice - the 32-bit slice is dropped from the output. Binaries with
+an **arm64e** slice keep the plain arm64 slice, or the arm64e one when there is
+no plain arm64 slice. **Apple Arcade** apps need a second, Arcade credential
+from the same account, minted alongside the regular one. If an app
 can't be decrypted offline at all, ipadecrypt automatically falls back to
 decrypting it **on your jailbroken device** when one is configured (the same
 device used for minting). Pass `--no-on-device` to disable the fallback, or
@@ -44,8 +47,9 @@ device used for minting). Pass `--no-on-device` to disable the fallback, or
 ### On the jailbroken iPhone
 | Requirement | Purpose |
 |---|---|
-| **OpenSSH** | The mint and the on-device fallback connect over SSH (install OpenSSH from Sileo), as `root` or as a user that can `sudo` - `mobile` on Dopamine and palera1n rootless, where root has no password by default |
+| **OpenSSH** | The mint and the on-device fallback connect over SSH (install OpenSSH from Sileo), as `root` or as a user that can `sudo` - `mobile` on Dopamine and palera1n rootless, where root has no password by default. With SSH key auth you are asked once for that user's sudo password |
 | **≥1 owned App Store app installed** | Bought with the same Apple ID; used to trigger FairPlay once during the mint |
+| **An Apple Arcade app installed** (optional) | From the same Apple ID; only to mint the Arcade credential that decrypts Arcade apps |
 | **AppSync Unified + `appinst`** | Only for the on-device fallback: installs the app on the device so it can be decrypted |
 
 > Tested on iOS 16.7.11 with palera1n rootless and Dopamine on iPhone 8 Plus. iOS 10+ is expected to work for minting; decryption itself runs anywhere.
@@ -79,7 +83,7 @@ ipadecrypt bootstrap
 A three-step interactive wizard:
 
 1. **App Store sign-in** - Logs into the App Store. Credentials stay local in `~/.ipadecrypt/config.json`. The first sign-in downloads and caches the Apple frameworks the App Store engine emulates (~tens of MB, range-extracted from a pinned macOS image) under `~/.cache/ipadecrypt/`; later runs reuse the cache.
-2. **Credential mint** - Connects once to your jailbroken device over SSH and extracts the reusable account credential, cached under `~/.ipadecrypt/credentials/`.
+2. **Credential mint** - Connects once to your jailbroken device over SSH and extracts the reusable account credential, cached under `~/.ipadecrypt/credentials/`. If an Apple Arcade app from the account is installed, it also mints the account's Arcade credential; without one that step is skipped, and you can add it later by installing an Arcade app and re-running with `--remint`.
 3. **On-device fallback check** - Verifies the device is ready to decrypt apps the offline decryptor can't handle (AppSync Unified + `appinst` present, helper uploads and execs). Best-effort: a missing prerequisite only disables that fallback and is reported, not fatal.
 
 Run it again anytime; it skips minting if a credential is already cached (pass
@@ -111,7 +115,8 @@ ipadecrypt versions <bundle-id|app-store-id|app-store-url>
 
 - Only the supported SINF/SUPF license formats decrypt offline; apps shipping a newer, unsupported `SC_Info` format fall back to the on-device path when a device is configured.
 - The credential is per Apple account: decrypting an app requires signing in with (and having minted from) the account that owns it.
-- Only arm64 slices are decrypted: a fat binary is thinned to its arm64 slice, so 32-bit (armv7) and arm64e slices are dropped from the output. An app with no arm64 slice can't be decrypted offline.
+- Only one arm64 slice per binary is decrypted: a fat binary is thinned to its plain arm64 slice (or its arm64e slice when it has no plain one), so 32-bit (armv7) slices and arm64e slices next to a plain arm64 slice are dropped from the output. An app with no arm64 or arm64e slice can't be decrypted offline.
+- Apple Arcade apps decrypt only with the account's Arcade credential; without it they fall back to the on-device path when a device is configured.
 
 ## License
 

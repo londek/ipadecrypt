@@ -16,7 +16,7 @@ func (d *sshDevice) prepareFreya() error {
 
 	// Freya's amfid can kill ad-hoc helpers, so re-sign them with the existing
 	// device certificate while preserving their entitlements.
-	for _, name := range []string{"credential.ios", "driver.ios", "trigger.ios"} {
+	for _, name := range []string{"credential.ios", "driver.ios", "trigger.ios", "arcade-capture.ios"} {
 		program, err := d.path(name)
 		if err != nil {
 			return err

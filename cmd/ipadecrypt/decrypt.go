@@ -150,9 +150,9 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	// The decryption credential is required only for the offline path;
-	// --on-device decrypts via the device's own FairPlay and skips it.
-	var credential []byte
+	// The decryption credentials are required only for the offline path;
+	// --on-device decrypts via the device's own FairPlay and skips them.
+	var credentials fairplay.Credentials
 
 	if !decryptOnDevice {
 		dsid := cfg.Apple.DirectoryServicesIdentifier
@@ -163,11 +163,17 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 			return
 		}
 
-		credential, err = loadCachedCredential(paths, dsid)
+		credentials.Standard, err = loadCachedCredential(paths, dsid, false)
 		if err != nil {
 			tui.Err("no decryption credential for this account: %v", err)
 			tui.Info("run `ipadecrypt bootstrap` to mint it (one-time, needs your jailbroken device)")
 
+			return
+		}
+
+		credentials.Arcade, err = loadCachedCredential(paths, dsid, true)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			tui.Err("Apple Arcade credential: %v", err)
 			return
 		}
 	}
@@ -329,7 +335,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 	deviceConfigured := cfg.Device.Host != "" || cfg.Device.USB
 
 	if !decryptOnDevice {
-		switch attemptOfflineDecrypt(encPath, credential, outLocal) {
+		switch attemptOfflineDecrypt(encPath, credentials, outLocal) {
 		case offlineDone, offlineFatal:
 			return
 		}
@@ -376,7 +382,7 @@ const (
 // the caller then decides whether to fall back to the device.
 // On any non-done outcome the partial output is removed so a fallback writes a
 // clean file.
-func attemptOfflineDecrypt(encPath string, credential []byte, outLocal string) offlineOutcome {
+func attemptOfflineDecrypt(encPath string, credentials fairplay.Credentials, outLocal string) offlineOutcome {
 	outFile, err := os.OpenFile(outLocal, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		tui.Err("open local: %v", err)
@@ -400,8 +406,15 @@ func attemptOfflineDecrypt(encPath string, credential []byte, outLocal string) o
 		live.Message("writing IPA → %s", humanBytes(n))
 	}}
 
-	summary, err := fairplay.Decrypt(encPath, cw, credential, decryptSkipAppex)
+	summary, err := fairplay.Decrypt(encPath, cw, credentials, decryptSkipAppex)
 	if err != nil {
+		if errors.Is(err, fairplay.ErrNoArcadeCredential) {
+			live.Fail("offline decrypt failed: %v", err)
+			tui.Info("install any Apple Arcade app from this Apple ID on your device and re-run `ipadecrypt bootstrap --remint` to mint it")
+
+			return offlineNeedsDevice
+		}
+
 		if strings.Contains(err.Error(), "does not decode this SINF") {
 			live.Fail("decrypt failed: %v", err)
 			tui.Info("this credential belongs to a different Apple account; sign in with the account that owns the app and re-run `ipadecrypt bootstrap --remint`")

@@ -77,7 +77,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	if credentialCached(paths, dsid) && !bootstrapRemint {
+	if credentialCached(paths, dsid, false) && !bootstrapRemint {
 		tui.OK("credential already cached for this account")
 		tui.Info("pass --remint to replace it")
 	} else {
@@ -85,6 +85,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 		tui.Info("Requirements on the device:")
 		tui.Bullet("SSH (OpenSSH from Sileo) as root or a sudo user like mobile, reachable over the network or USB")
 		tui.Bullet("at least one App Store app bought with this Apple ID, installed")
+		tui.Bullet("optionally an Apple Arcade app from this Apple ID, to also decrypt Arcade apps")
 
 		if err := promptMintDevice(cfg); err != nil {
 			return
@@ -98,7 +99,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 		live := tui.NewLive()
 		live.Spin("minting credential (one-time)")
 
-		credential, err := credmint.Mint(context.Background(), cfg.Device, dsid)
+		credential, err := credmint.Mint(context.Background(), cfg.Device, dsid, false)
 		if err != nil {
 			if errors.Is(err, credmint.ErrBinariesUnavailable) {
 				live.Fail("this build cannot mint credentials")
@@ -112,12 +113,14 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 			return
 		}
 
-		if err := saveCredential(paths, dsid, credential); err != nil {
+		if err := saveCredential(paths, dsid, false, credential); err != nil {
 			live.Fail("cache credential: %v", err)
 			return
 		}
 
 		live.OK("credential minted and cached")
+
+		mintArcadeCredential(cfg, paths, dsid)
 	}
 
 	// ---- Step 3: on-device decrypt fallback readiness ----------------
@@ -126,6 +129,32 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 
 	tui.Spacer()
 	tui.OK("bootstrap complete - run `ipadecrypt decrypt <bundle-id|app-store-id|app-store-url|path-to-local-ipa>`")
+}
+
+// mintArcadeCredential mints the account's Apple Arcade credential when an
+// Arcade app from it is installed on the device. Only Arcade apps need it, so
+// it never fails bootstrap.
+func mintArcadeCredential(cfg *config.Config, paths *config.Paths, dsid string) {
+	live := tui.NewLive()
+	live.Spin("minting Apple Arcade credential")
+
+	credential, err := credmint.Mint(context.Background(), cfg.Device, dsid, true)
+
+	switch {
+	case errors.Is(err, credmint.ErrNoArcadeApp):
+		live.Stop()
+		tui.Info("no Apple Arcade app from this Apple ID is installed - skipped the Arcade credential.\nOnly Arcade apps need it: install one and re-run `ipadecrypt bootstrap --remint`.")
+	case err != nil:
+		live.Fail("Arcade credential mint failed: %v", err)
+		tui.Info("regular App Store apps are unaffected; only Apple Arcade apps need this credential")
+	default:
+		if err := saveCredential(paths, dsid, true, credential); err != nil {
+			live.Fail("cache Arcade credential: %v", err)
+			return
+		}
+
+		live.OK("Apple Arcade credential minted and cached")
+	}
 }
 
 // verifyDeviceDecryptReady checks that the configured device can serve the

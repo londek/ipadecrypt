@@ -1,12 +1,13 @@
 # credmint device toolchain
 
-`internal/credmint/bundle/` holds the five files pushed to the jailbroken
+`internal/credmint/bundle/` holds the six files pushed to the jailbroken
 device during one-time credential minting, embedded into the CLI via `go:embed`:
 
-- `credential.ios`, `driver.ios`, `trigger.ios` — signed arm64 iOS programs
+- `credential.ios`, `driver.ios`, `trigger.ios`, `arcade-capture.ios` — signed
+  arm64 iOS programs
 - `static-key-table.bin`, `core4-word-table.bin` — data blobs
 
-All five are committed, so a plain `go build` is mint-capable.
+All six are committed, so a plain `go build` is mint-capable.
 
 ## Rebuilding
 

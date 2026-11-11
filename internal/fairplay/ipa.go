@@ -13,6 +13,17 @@ import (
 	"github.com/londek/ipadecrypt/internal/pipeline"
 )
 
+// Credentials are one account's FairPlay credentials: Standard decodes regular
+// App Store licenses and Arcade decodes Apple Arcade ones. Arcade may be nil.
+type Credentials struct {
+	Standard []byte
+	Arcade   []byte
+}
+
+// ErrNoArcadeCredential reports an Apple Arcade app decrypted without the
+// account's Arcade credential.
+var ErrNoArcadeCredential = errors.New("this Apple Arcade app needs the account's Arcade credential")
+
 // Summary reports what a Decrypt run processed.
 type Summary struct {
 	Binaries int
@@ -20,13 +31,13 @@ type Summary struct {
 }
 
 // Decrypt reads the encrypted IPA at srcIPA, decrypts every FairPlay-protected
-// arm64 binary it can (main app, frameworks, extensions) using the 16-byte
-// account credential, and writes a decrypted IPA to dst. Fat binaries come out
-// thinned to their arm64 slice. SC_Info, Watch apps and iTunesMetadata are
+// arm64 binary it can (main app, frameworks, extensions) using the account
+// credential matching each license, and writes a decrypted IPA to dst. Fat
+// binaries come out thinned to their arm64 slice. SC_Info, Watch apps and iTunesMetadata are
 // stripped from the output (see pipeline.Assemble).
 // With skipAppex, .appex binaries are left out of the decrypt plan.
-func Decrypt(srcIPA string, dst io.Writer, credential []byte, skipAppex bool) (Summary, error) {
-	if len(credential) != 16 {
+func Decrypt(srcIPA string, dst io.Writer, credentials Credentials, skipAppex bool) (Summary, error) {
+	if len(credentials.Standard) != CredentialSize || (credentials.Arcade != nil && len(credentials.Arcade) != CredentialSize) {
 		return Summary{}, errors.New("credential must contain exactly 16 bytes")
 	}
 
@@ -68,7 +79,7 @@ func Decrypt(srcIPA string, dst io.Writer, credential []byte, skipAppex bool) (S
 		}
 
 		if _, err := arm64EncryptionInfo(source); err != nil {
-			if errors.Is(err, errCryptidZero) {
+			if errors.Is(err, errNotEncrypted) {
 				continue
 			}
 
@@ -95,9 +106,18 @@ func Decrypt(srcIPA string, dst io.Writer, credential []byte, skipAppex bool) (S
 			return Summary{}, err
 		}
 
+		credential := credentials.Standard
+		if isArcadeSinf(sinf) {
+			if credentials.Arcade == nil {
+				return Summary{}, ErrNoArcadeCredential
+			}
+
+			credential = credentials.Arcade
+		}
+
 		result, pages, err := decryptBinary(source, sinf, supf, credential)
 		if err != nil {
-			if errors.Is(err, errCryptidZero) {
+			if errors.Is(err, errNotEncrypted) {
 				continue
 			}
 

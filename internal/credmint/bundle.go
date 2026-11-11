@@ -15,6 +15,9 @@ var driverBinary []byte
 //go:embed bundle/trigger.ios
 var triggerBinary []byte
 
+//go:embed bundle/arcade-capture.ios
+var arcadeCaptureBinary []byte
+
 //go:embed bundle/static-key-table.bin
 var staticKeyTable []byte
 
@@ -37,11 +40,11 @@ type bundleFile struct {
 	executable bool
 }
 
-// bundleFiles returns the five files pushed to the device, in the order
+// bundleFiles returns the six files pushed to the device, in the order
 // retrieve.py uploads them, or ErrBinariesUnavailable when the device
 // binaries are still placeholders.
 func bundleFiles() ([]bundleFile, error) {
-	for _, b := range [][]byte{credentialBinary, driverBinary, triggerBinary} {
+	for _, b := range [][]byte{credentialBinary, driverBinary, triggerBinary, arcadeCaptureBinary} {
 		if bytes.HasPrefix(b, placeholderMarker) {
 			return nil, ErrBinariesUnavailable
 		}
@@ -51,6 +54,7 @@ func bundleFiles() ([]bundleFile, error) {
 		{name: "credential.ios", data: credentialBinary, executable: true},
 		{name: "driver.ios", data: driverBinary, executable: true},
 		{name: "trigger.ios", data: triggerBinary, executable: true},
+		{name: "arcade-capture.ios", data: arcadeCaptureBinary, executable: true},
 		{name: "static-key-table.bin", data: staticKeyTable},
 		{name: "core4-word-table.bin", data: core4WordTable},
 	}, nil

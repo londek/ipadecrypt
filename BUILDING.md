@@ -4,8 +4,9 @@ ipadecrypt has three parts:
 
 - **`ipadecrypt` CLI** - Go binary that runs on your computer. This is all you
   need for everyday development and for decrypting apps.
-- **Device mint bundle** - three small signed arm64 iOS programs
-  (`credential.ios`, `driver.ios`, `trigger.ios`) plus two data blobs, embedded
+- **Device mint bundle** - four small signed arm64 iOS programs
+  (`credential.ios`, `driver.ios`, `trigger.ios`, `arcade-capture.ios`) plus two
+  data blobs, embedded
   into the CLI with `go:embed` and pushed to a jailbroken device only during the
   one-time `bootstrap` credential mint.
 - **On-device decrypt helper** - a signed arm64 iOS program
@@ -20,7 +21,7 @@ ipadecrypt has three parts:
 - Go 1.25+
 
 That's it. The mint bundle lives under `internal/credmint/bundle/` - data blobs
-and the three signed `*.ios` programs are committed and embedded via `go:embed`,
+and the four signed `*.ios` programs are committed and embedded via `go:embed`,
 so a plain build is fully mint-capable. (If the `*.ios` files are ever stripped
 to the placeholder marker, the CLI still decrypts but `credmint.Mint` returns
 `ErrBinariesUnavailable`.)
@@ -62,7 +63,7 @@ IPADECRYPT_CREDMINT_IMAGE=build ./internal/credmint/toolchain/build.sh
 ./internal/credmint/toolchain/build.sh /path/to/fairplay-decrypt/credential-retrieval
 ```
 
-This compiles the three `*.ios` programs, signs them, copies them and the data
+This compiles the four `*.ios` programs, signs them, copies them and the data
 blobs into `internal/credmint/bundle/`, and fails if any program is still a
 placeholder. Commit the refreshed bundle. The build is byte-reproducible, and
 the [`credmint bundle drift`](.github/workflows/credmint-bundle.yml) CI job
