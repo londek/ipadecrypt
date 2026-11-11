@@ -442,7 +442,7 @@ func armSupfRecordOffset(supf []byte, requiredPages int, wantedCPU, wantedSubtyp
 	}
 
 	magic := string(supf[1:4])
-	if magic != "507" && magic != "510" && magic != "612" {
+	if magic != "319" && magic != "507" && magic != "510" && magic != "612" {
 		return 0, errors.New("unsupported SUPF format")
 	}
 
