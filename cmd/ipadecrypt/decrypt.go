@@ -406,7 +406,7 @@ func attemptOfflineDecrypt(encPath string, credentials fairplay.Credentials, out
 		live.Message("writing IPA → %s", humanBytes(n))
 	}}
 
-	summary, err := fairplay.Decrypt(encPath, cw, credentials, decryptSkipAppex)
+	summary, err := fairplay.Decrypt(encPath, cw, credentials, decryptSkipAppex, decryptKeepWatch)
 	if err != nil {
 		if errors.Is(err, fairplay.ErrNoArcadeCredential) {
 			live.Fail("offline decrypt failed: %v", err)

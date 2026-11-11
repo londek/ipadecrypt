@@ -39,14 +39,10 @@ func copyEntry(f *zip.File, w *zip.Writer) error {
 	return err
 }
 
-// isAppExtPath matches Payload/<App>.app/PlugIns/<*>.appex/...
+// isAppExtPath matches anything inside a .appex bundle, the same entries
+// fairplay.Decrypt skips with skipAppex.
 func isAppExtPath(name string) bool {
-	parts := strings.Split(name, "/")
-
-	return len(parts) >= 4 &&
-		parts[0] == "Payload" &&
-		strings.HasSuffix(parts[1], ".app") &&
-		parts[2] == "PlugIns"
+	return strings.Contains(name, ".appex/")
 }
 
 // AppInfo reads BundleID + version from Payload/<Name>.app/Info.plist.
