@@ -139,7 +139,7 @@ func Verify(outputIPA, sourceIPA string, skipAppex bool) (VerifyResult, error) {
 	return res, nil
 }
 
-// cryptZeroed reports whether any encrypted arm64 slice's crypt region is an
+// cryptZeroed reports whether any encrypted slice's crypt region is an
 // all-zero fill - the signal that decryption produced no plaintext. Handles
 // both thin and fat (in-place) output.
 func cryptZeroed(data []byte) bool {

@@ -109,6 +109,11 @@ func ensureDeviceSudo(cfg *config.Config, dev *device.Client) error {
 // encrypted source IPA already on the host; cleanups owns device teardown so
 // it runs on a live session.
 func runDeviceDecrypt(cfg *config.Config, cleanups *cleanupStack, encPath, appBundleID, appVersion, outLocal string) error {
+	// The device can't decrypt Watch binaries; they never run on the phone.
+	if decryptKeepWatch {
+		tui.Warn("--keep-watch applies to offline decryption only; the Watch app is removed from on-device output")
+	}
+
 	live := tui.NewLive()
 	live.Spin("connecting to %s", deviceEndpoint(cfg.Device))
 
@@ -327,7 +332,7 @@ func decryptInstalledBundle(dev *device.Client, cleanups *cleanupStack, helperPa
 	// Host-side assembly: the helper streams decrypted Mach-Os on stdout;
 	// the host fuses them with the (unpatched) source IPA into outFile, so
 	// the output keeps the original Info.plist and layout.
-	assembleErr := pipeline.Assemble(srcIPAPath, cw, func(write pipeline.SubstituteWriter) error {
+	assembleErr := pipeline.Assemble(srcIPAPath, cw, false, func(write pipeline.SubstituteWriter) error {
 		code, err := dev.RunHelperExecs(helperPath, bundleID, bundlePath, decryptVerbose, decryptSkipAppex, onEvent, func(name string, _ int64, r io.Reader) error {
 			return write(name, r)
 		})

@@ -8,8 +8,8 @@ import (
 )
 
 // SubstituteWriter writes one substituted entry into the output IPA.
-// Excluded entries (SC_Info, Watch, dSYM, etc.) are silently dropped so
-// the caller doesn't have to mirror the exclude set.
+// Excluded entries (SC_Info, dSYM, etc., and Watch unless keepWatch) are
+// silently dropped so the caller doesn't have to mirror the exclude set.
 type SubstituteWriter func(name string, r io.Reader) error
 
 // Assemble writes a decrypted IPA into dst by combining caller-supplied
@@ -20,8 +20,9 @@ type SubstituteWriter func(name string, r io.Reader) error
 // entry in the output and records it so the srcIPA traversal skips the
 // original. After fillSubstitutes returns, every srcIPA entry that
 // wasn't substituted and doesn't match the on-device exclude set is
-// copied byte-for-byte (deflate-preserving) into dst.
-func Assemble(srcIPA string, dst io.Writer,
+// copied byte-for-byte (deflate-preserving) into dst. With keepWatch, Watch
+// and WatchKitSupport2 entries are kept instead of excluded.
+func Assemble(srcIPA string, dst io.Writer, keepWatch bool,
 	fillSubstitutes func(write SubstituteWriter) error) error {
 	src, err := zip.OpenReader(srcIPA)
 	if err != nil {
@@ -35,7 +36,7 @@ func Assemble(srcIPA string, dst io.Writer,
 	written := make(map[string]struct{})
 
 	write := func(name string, r io.Reader) error {
-		if isExcludedIPAEntry(name) {
+		if isExcludedIPAEntry(name, keepWatch) {
 			// Drop and drain so the framed stream stays aligned.
 			_, err := io.Copy(io.Discard, r)
 			return err
@@ -65,7 +66,7 @@ func Assemble(srcIPA string, dst io.Writer,
 			continue
 		}
 
-		if isExcludedIPAEntry(f.Name) {
+		if isExcludedIPAEntry(f.Name, keepWatch) {
 			continue
 		}
 
@@ -81,7 +82,8 @@ func Assemble(srcIPA string, dst io.Writer,
 // isExcludedIPAEntry mirrors the -x patterns the on-device run_zip
 // applies: SC_Info (FairPlay sinfs), Watch/WatchKitSupport2, dSYM,
 // BCSymbolMaps, Symbols, META-INF, iTunesMetadata.plist, iTunesArtwork.
-func isExcludedIPAEntry(name string) bool {
+// keepWatch lets Watch/WatchKitSupport2 through.
+func isExcludedIPAEntry(name string, keepWatch bool) bool {
 	s := strings.TrimSuffix(name, "/")
 
 	if s == "iTunesMetadata.plist" || s == "Payload/iTunesMetadata.plist" || s == "Payload/iTunesArtwork" {
@@ -98,7 +100,11 @@ func isExcludedIPAEntry(name string) bool {
 	for i := 2; i < len(parts); i++ {
 		seg := parts[i]
 		switch seg {
-		case "Watch", "WatchKitSupport2", "SC_Info", "BCSymbolMaps", "Symbols":
+		case "Watch", "WatchKitSupport2":
+			if !keepWatch {
+				return true
+			}
+		case "SC_Info", "BCSymbolMaps", "Symbols":
 			return true
 		}
 

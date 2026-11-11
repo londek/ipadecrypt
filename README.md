@@ -26,16 +26,17 @@ account**, during `bootstrap`, to mint a reusable 16-byte account credential.
 After that, downloading and decrypting any app for that account is fully
 offline.
 
-The offline decryptor handles **arm64** slices (everything the modern App Store
-ships). Old builds that still ship a **32-bit (armv7) slice** are thinned to
-their arm64 slice - the 32-bit slice is dropped from the output. Binaries with
-an **arm64e** slice keep the plain arm64 slice, or the arm64e one when there is
-no plain arm64 slice. **Apple Arcade** apps need a second, Arcade credential
-from the same account, minted alongside the regular one. If an app
-can't be decrypted offline at all, ipadecrypt automatically falls back to
-decrypting it **on your jailbroken device** when one is configured (the same
-device used for minting). Pass `--no-on-device` to disable the fallback, or
-`--on-device` to go straight to the device.
+The offline decryptor handles **arm64**, **arm64e**, **arm64_32** and
+**32-bit ARM** slices, with page keys from `.supf`/`.v5.supf` or
+`.supp`/`.v4.supp` files. A fat binary is thinned to one slice: the plain
+arm64 slice, else arm64e, else arm64_32, else 32-bit ARM (armv7 when there
+are several). The other slices are dropped from the output. **Apple Arcade**
+apps need a second, Arcade credential from the same account, minted
+alongside the regular one. If an app can't be decrypted offline at all,
+ipadecrypt automatically falls back to decrypting it **on your jailbroken
+device** when one is configured (the same device used for minting). Pass
+`--no-on-device` to disable the fallback, or `--on-device` to go straight to
+the device.
 
 ## Requirements
 
@@ -102,6 +103,7 @@ decrypting it on the device. Useful flags:
 
 - `--on-device` - skip the offline attempt and decrypt on the device directly.
 - `--no-on-device` - never touch the device; fail if offline can't fully decrypt.
+- `--keep-watch` - keep and decrypt the Watch app instead of removing it (offline only).
 - `--patch-device-type` - expand `UIDeviceFamily` so an app built for a different device type still installs during the on-device fallback.
 - `--no-uninstall` / `--force-uninstall` - control whether the app is removed from the device after an on-device decrypt (default: removed only if this run installed it).
 
@@ -113,9 +115,10 @@ ipadecrypt versions <bundle-id|app-store-id|app-store-url>
 
 ## Known issues
 
-- Only the supported SINF/SUPF license formats decrypt offline; apps shipping a newer, unsupported `SC_Info` format fall back to the on-device path when a device is configured.
+- Only the supported SINF/SUPF/SUPP license formats decrypt offline; apps shipping a newer, unsupported `SC_Info` format fall back to the on-device path when a device is configured.
 - The credential is per Apple account: decrypting an app requires signing in with (and having minted from) the account that owns it.
-- Only one arm64 slice per binary is decrypted: a fat binary is thinned to its plain arm64 slice (or its arm64e slice when it has no plain one), so 32-bit (armv7) slices and arm64e slices next to a plain arm64 slice are dropped from the output. An app with no arm64 or arm64e slice can't be decrypted offline.
+- Only one slice per binary is decrypted: a fat binary is thinned to its plain arm64 slice, else arm64e, else arm64_32, else 32-bit ARM (armv7 when there are several). The other slices are dropped from the output. A binary with no ARM slice can't be decrypted offline.
+- A Watch app kept with `--keep-watch` is thinned like any other binary (normally to arm64_32), so it does not run on Apple Watch Series 3 or earlier.
 - Apple Arcade apps decrypt only with the account's Arcade credential; without it they fall back to the on-device path when a device is configured.
 
 ## License

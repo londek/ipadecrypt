@@ -31,12 +31,13 @@ type Summary struct {
 }
 
 // Decrypt reads the encrypted IPA at srcIPA, decrypts every FairPlay-protected
-// arm64 binary it can (main app, frameworks, extensions) using the account
+// binary it can (main app, frameworks, extensions) using the account
 // credential matching each license, and writes a decrypted IPA to dst. Fat
-// binaries come out thinned to their arm64 slice. SC_Info, Watch apps and iTunesMetadata are
-// stripped from the output (see pipeline.Assemble).
-// With skipAppex, .appex binaries are left out of the decrypt plan.
-func Decrypt(srcIPA string, dst io.Writer, credentials Credentials, skipAppex bool) (Summary, error) {
+// binaries come out thinned to one slice (see armEncryptionInfo). SC_Info
+// and iTunesMetadata are stripped from the output, and Watch apps too unless
+// keepWatch is set (see pipeline.Assemble); stripped Watch binaries are not
+// decrypted. With skipAppex, .appex binaries are left out of the decrypt plan.
+func Decrypt(srcIPA string, dst io.Writer, credentials Credentials, skipAppex, keepWatch bool) (Summary, error) {
 	if len(credentials.Standard) != CredentialSize || (credentials.Arcade != nil && len(credentials.Arcade) != CredentialSize) {
 		return Summary{}, errors.New("credential must contain exactly 16 bytes")
 	}
@@ -73,12 +74,17 @@ func Decrypt(srcIPA string, dst io.Writer, credentials Credentials, skipAppex bo
 			continue
 		}
 
+		// pipeline.Assemble drops Watch apps from the output unless keepWatch.
+		if !keepWatch && strings.Contains(e.binaryPath, "/Watch/") {
+			continue
+		}
+
 		source, err := readMember(members[e.binaryPath])
 		if err != nil {
 			return Summary{}, err
 		}
 
-		if _, err := arm64EncryptionInfo(source); err != nil {
+		if _, err := armEncryptionInfo(source); err != nil {
 			if errors.Is(err, errNotEncrypted) {
 				continue
 			}
@@ -90,7 +96,7 @@ func Decrypt(srcIPA string, dst io.Writer, credentials Credentials, skipAppex bo
 		if !nameSet[sinfPath] {
 			fallback := enclosingAppSinf(nameSet, e.bundle)
 			if fallback == "" {
-				return Summary{}, fmt.Errorf("SUPF lacks binary/SINF: %s", e.supfPath)
+				return Summary{}, fmt.Errorf("SUPF/SUPP lacks binary/SINF: %s", e.supfPath)
 			}
 
 			sinfPath = fallback
@@ -129,10 +135,10 @@ func Decrypt(srcIPA string, dst io.Writer, credentials Credentials, skipAppex bo
 	}
 
 	if len(replacements) == 0 {
-		return Summary{}, errors.New("no encrypted arm64 binaries with supported SINF/SUPF")
+		return Summary{}, errors.New("no encrypted binaries with supported SINF/SUPF/SUPP")
 	}
 
-	err = pipeline.Assemble(srcIPA, dst, func(write pipeline.SubstituteWriter) error {
+	err = pipeline.Assemble(srcIPA, dst, keepWatch, func(write pipeline.SubstituteWriter) error {
 		for name, data := range replacements {
 			if err := write(name, bytes.NewReader(data)); err != nil {
 				return err
@@ -155,43 +161,50 @@ type planEntry struct {
 	bundle     string
 }
 
-// planEntries maps every SUPF record in the IPA to its binary and SINF,
-// preferring v5 records. Mirrors decrypt.py's supf_paths + plan builder.
+// pageKeySuffixes lists the page-key file suffixes, best first: SUPF
+// (f-class: .supf/.v5.supf) and SUPP (p-class: .supp/.v4.supp). Newer
+// generations (.v5.supf, .v4.supp) rank ahead of legacy ones (.supf, .supp),
+// and SUPF ahead of SUPP within each.
+var pageKeySuffixes = []string{".v5.supf", ".v4.supp", ".supf", ".supp"}
+
+// pageKeySuffix returns name's rank and suffix in pageKeySuffixes, or -1.
+func pageKeySuffix(name string) (int, string) {
+	for i, s := range pageKeySuffixes {
+		if strings.HasSuffix(name, s) {
+			return i, s
+		}
+	}
+
+	return -1, ""
+}
+
+// planEntries maps every SUPF/SUPP in the IPA to its binary and SINF. Mirrors
+// decrypt.py's supf_paths + plan builder.
 func planEntries(names map[string]bool) ([]planEntry, error) {
 	var entries []planEntry
 
 	for _, supfPath := range supfPaths(names) {
 		idx := strings.LastIndex(supfPath, "/SC_Info/")
 		if idx < 0 {
-			return nil, fmt.Errorf("SUPF outside SC_Info: %s", supfPath)
+			return nil, fmt.Errorf("SUPF/SUPP outside SC_Info: %s", supfPath)
 		}
 
 		bundle := supfPath[:idx]
 		filename := supfPath[idx+len("/SC_Info/"):]
 
-		isV5 := strings.HasSuffix(filename, ".v5.supf")
-
-		var stem string
-		if isV5 {
-			stem = strings.TrimSuffix(filename, ".v5.supf")
-		} else {
-			stem = strings.TrimSuffix(filename, ".supf")
-		}
-
+		_, suffix := pageKeySuffix(filename)
+		stem := strings.TrimSuffix(filename, suffix)
 		binaryPath := bundle + "/" + stem
 
-		sinfName := stem + ".sinf"
-		if isV5 {
-			sinfName = stem + ".v4.sinf"
-		}
-
-		sinfPath := bundle + "/SC_Info/" + sinfName
-		if !names[sinfPath] && isV5 {
-			sinfPath = bundle + "/SC_Info/" + stem + ".sinf"
+		sinfPath := bundle + "/SC_Info/" + stem + ".sinf"
+		if suffix == ".v5.supf" || suffix == ".v4.supp" {
+			if v4 := bundle + "/SC_Info/" + stem + ".v4.sinf"; names[v4] {
+				sinfPath = v4
+			}
 		}
 
 		if !names[binaryPath] {
-			return nil, fmt.Errorf("SUPF lacks binary/SINF: %s", supfPath)
+			return nil, fmt.Errorf("SUPF/SUPP lacks binary/SINF: %s", supfPath)
 		}
 
 		entries = append(entries, planEntry{binaryPath: binaryPath, supfPath: supfPath, sinfPath: sinfPath, bundle: bundle})
@@ -200,31 +213,28 @@ func planEntries(names map[string]bool) ([]planEntry, error) {
 	return entries, nil
 }
 
+// supfPaths keeps, per binary stem, the SUPF/SUPP whose suffix ranks best in
+// pageKeySuffixes.
 func supfPaths(names map[string]bool) []string {
-	sorted := make([]string, 0, len(names))
-	for n := range names {
-		sorted = append(sorted, n)
-	}
+	best := make(map[string]string)
 
-	sort.Strings(sorted)
+	for name := range names {
+		rank, suffix := pageKeySuffix(name)
+		if rank < 0 {
+			continue
+		}
 
-	byBinary := make(map[string]string)
+		stem := strings.TrimSuffix(name, suffix)
 
-	for _, name := range sorted {
-		switch {
-		case strings.HasSuffix(name, ".v5.supf"):
-			byBinary[strings.TrimSuffix(name, ".v5.supf")] = name
-		case strings.HasSuffix(name, ".supf"):
-			key := strings.TrimSuffix(name, ".supf")
-			if _, ok := byBinary[key]; !ok {
-				byBinary[key] = name
-			}
+		cur, ok := best[stem]
+		if curRank, _ := pageKeySuffix(cur); !ok || rank < curRank {
+			best[stem] = name
 		}
 	}
 
-	out := make([]string, 0, len(byBinary))
-	for _, v := range byBinary {
-		out = append(out, v)
+	out := make([]string, 0, len(best))
+	for _, name := range best {
+		out = append(out, name)
 	}
 
 	sort.Strings(out)

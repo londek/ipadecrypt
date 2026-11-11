@@ -1,5 +1,6 @@
 // Package fairplay decrypts FairPlay-encrypted App Store Mach-O binaries on the
-// host, given the IPA's SINF/SUPF records and a 16-byte per-account credential.
+// host, given the IPA's SINF and SUPF/SUPP records and a 16-byte per-account
+// credential.
 // It is a Go port of the open-source fairplay-decrypt research (core.py) and
 // needs no device.
 package fairplay
@@ -14,12 +15,17 @@ import (
 )
 
 const (
+	cpuTypeARM       = 0x0000000C
 	cpuTypeARM64     = 0x0100000C
+	cpuTypeARM6432   = 0x0200000C
+	cpuSubtypeARMV7  = 9
 	cpuSubtypeARM64E = 2
 	cpuSubtypeMask   = 0x00FFFFFF
 	pageSize         = 4096
 
+	lcEncryptionInfo   = 0x21
 	lcEncryptionInfo64 = 0x2C
+	machoMagicLE       = 0xFEEDFACE
 	machoMagic64LE     = 0xFEEDFACF
 )
 
@@ -48,39 +54,44 @@ func xorBytes(a, b []byte) []byte {
 	return out
 }
 
-// machoInfo locates the arm64 slice and its encrypted region within a
+// machoInfo locates the slice to decrypt and its encrypted region within a
 // (possibly fat) Mach-O.
 type machoInfo struct {
 	base          int
 	size          int
+	cpu           uint32
 	subtype       uint32
 	cryptOff      int
 	cryptSize     int
 	cryptidOffset int
 }
 
-type arm64Slice struct {
-	base, size int
-	subtype    uint32
+type armSlice struct {
+	base, size   int
+	cpu, subtype uint32
 }
 
-// arm64EncryptionInfo parses the Mach-O header(s) and returns the encrypted
-// region of the arm64 slice the output is thinned to: the plain arm64 slice,
-// or the arm64e one when there is none. It mirrors core.py
-// arm64_encryption_infos, which decrypts every arm64 slice in place instead.
-// errNotEncrypted reports a slice with no active encryption command.
-func arm64EncryptionInfo(data []byte) (machoInfo, error) {
-	var plain, arm64e []arm64Slice
+// armEncryptionInfo parses the Mach-O header(s) and returns the encrypted
+// region of the slice the output is thinned to: the plain arm64 slice, else
+// arm64e, else arm64_32, else 32-bit ARM (armv7 when there are several). It
+// mirrors core.py arm_encryption_infos, which decrypts every ARM slice in
+// place instead. errNotEncrypted reports a slice with no active encryption
+// command.
+func armEncryptionInfo(data []byte) (machoInfo, error) {
+	var plain, arm64e, arm6432, arm32 []armSlice
 
 	addSlice := func(cpu, sub uint32, base, size int) {
-		if cpu != cpuTypeARM64 {
-			return
-		}
+		s := armSlice{base, size, cpu, sub}
 
-		if sub&cpuSubtypeMask == cpuSubtypeARM64E {
-			arm64e = append(arm64e, arm64Slice{base, size, sub})
-		} else {
-			plain = append(plain, arm64Slice{base, size, sub})
+		switch {
+		case cpu == cpuTypeARM64 && sub&cpuSubtypeMask == cpuSubtypeARM64E:
+			arm64e = append(arm64e, s)
+		case cpu == cpuTypeARM64:
+			plain = append(plain, s)
+		case cpu == cpuTypeARM6432:
+			arm6432 = append(arm6432, s)
+		case cpu == cpuTypeARM:
+			arm32 = append(arm32, s)
 		}
 	}
 
@@ -107,25 +118,57 @@ func arm64EncryptionInfo(data []byte) (machoInfo, error) {
 			addSlice(binary.BigEndian.Uint32(data[off:]), binary.BigEndian.Uint32(data[off+4:]),
 				int(binary.BigEndian.Uint64(data[off+8:])), int(binary.BigEndian.Uint64(data[off+16:])))
 		}
-	case len(data) >= 32 && data[0] == 0xcf && data[1] == 0xfa && data[2] == 0xed && data[3] == 0xfe:
+	case len(data) >= 28 && (data[0] == 0xce || data[0] == 0xcf) && data[1] == 0xfa && data[2] == 0xed && data[3] == 0xfe:
 		addSlice(binary.LittleEndian.Uint32(data[4:]), binary.LittleEndian.Uint32(data[8:]), 0, len(data))
 	default:
-		return machoInfo{}, errors.New("not a supported arm64 Mach-O")
+		return machoInfo{}, errors.New("not a supported ARM Mach-O")
 	}
 
-	slices := plain
-	if len(slices) == 0 {
-		slices = arm64e
+	var slices []armSlice
+
+	for _, group := range [][]armSlice{plain, arm64e, arm6432, arm32} {
+		if len(group) > 0 {
+			slices = group
+			break
+		}
+	}
+
+	// Fat 32-bit apps pair armv7 with armv7s or armv6; armv7 runs on every
+	// device that runs either.
+	if len(slices) > 1 && slices[0].cpu == cpuTypeARM {
+		var armv7 []armSlice
+
+		for _, s := range slices {
+			if s.subtype&cpuSubtypeMask == cpuSubtypeARMV7 {
+				armv7 = append(armv7, s)
+			}
+		}
+
+		slices = armv7
 	}
 
 	if len(slices) != 1 {
-		return machoInfo{}, fmt.Errorf("expected one arm64 slice, found %d", len(slices))
+		return machoInfo{}, fmt.Errorf("expected one ARM slice to decrypt, found %d", len(slices))
 	}
 
-	base, sliceSize := slices[0].base, slices[0].size
+	chosen := slices[0]
+	base, sliceSize := chosen.base, chosen.size
 
-	if base+sliceSize > len(data) || base+32 > len(data) {
-		return machoInfo{}, errors.New("arm64 slice exceeds file")
+	// arm64_32 uses the 32-bit header and load command, like 32-bit ARM.
+	is64 := chosen.cpu == cpuTypeARM64
+
+	var (
+		headerSize = 28
+		encCmd     = uint32(lcEncryptionInfo)
+		wantMagic  = uint32(machoMagicLE)
+	)
+
+	if is64 {
+		headerSize, encCmd, wantMagic = 32, lcEncryptionInfo64, machoMagic64LE
+	}
+
+	if base+sliceSize > len(data) || base+headerSize > len(data) {
+		return machoInfo{}, errors.New("Mach-O slice exceeds file")
 	}
 
 	magic := binary.LittleEndian.Uint32(data[base:])
@@ -133,15 +176,15 @@ func arm64EncryptionInfo(data []byte) (machoInfo, error) {
 	ncmds := int(binary.LittleEndian.Uint32(data[base+16:]))
 	sizeofcmds := int(binary.LittleEndian.Uint32(data[base+20:]))
 
-	if magic != machoMagic64LE || cpu != cpuTypeARM64 || ncmds > 1000 {
-		return machoInfo{}, errors.New("invalid arm64 Mach-O header")
+	if magic != wantMagic || cpu != chosen.cpu || ncmds > 1000 {
+		return machoInfo{}, errors.New("invalid Mach-O slice header")
 	}
 
-	pos := base + 32
+	pos := base + headerSize
 
 	commandsEnd := pos + sizeofcmds
 	if commandsEnd > base+sliceSize {
-		return machoInfo{}, errors.New("load commands exceed arm64 slice")
+		return machoInfo{}, errors.New("load commands exceed Mach-O slice")
 	}
 
 	var (
@@ -161,8 +204,8 @@ func arm64EncryptionInfo(data []byte) (machoInfo, error) {
 			return machoInfo{}, errors.New("invalid load command")
 		}
 
-		if cmd == lcEncryptionInfo64 {
-			if size < 24 {
+		if cmd == encCmd {
+			if size < 20 {
 				return machoInfo{}, errors.New("short encryption info command")
 			}
 
@@ -197,14 +240,14 @@ func arm64EncryptionInfo(data []byte) (machoInfo, error) {
 	}
 
 	return machoInfo{
-		base: base, size: sliceSize, subtype: slices[0].subtype,
+		base: base, size: sliceSize, cpu: chosen.cpu, subtype: chosen.subtype,
 		cryptOff: cryptOff, cryptSize: cryptSize, cryptidOffset: cryptidOffset,
 	}, nil
 }
 
-// errNotEncrypted reports an arm64 slice that has no encryption command or
-// whose cryptid is already 0.
-var errNotEncrypted = errors.New("arm64 slice is not encrypted")
+// errNotEncrypted reports a slice that has no encryption command or whose
+// cryptid is already 0.
+var errNotEncrypted = errors.New("Mach-O slice is not encrypted")
 
 type atom struct {
 	tag        [4]byte
@@ -359,10 +402,41 @@ func CredentialDecodes(credential, sinf []byte) bool {
 	return err == nil
 }
 
-// arm64SupfRecordOffset locates the per-page record block of the arm64 slice
-// with the given subtype in a SUPF. Mirrors core.py arm64_supf_record_offset,
+// pclassPageKeyOffset returns the offset of the 32-byte key for absolutePage
+// in a SUPP (.supp v01 / .v4.supp v04): one table indexing every 4 KB page of
+// the file from offset 0, so page p sits at base + 32*p. The v01 header
+// carries a 20-byte code-signature SHA-1 that v04 omits. Mirrors core.py
+// pclass_page_key_offset.
+func pclassPageKeyOffset(supp []byte, absolutePage int) (int, error) {
+	if len(supp) < 8 || (supp[0] != 1 && supp[0] != 4) {
+		return 0, errors.New("unsupported SUPP format")
+	}
+
+	pos := 4
+	if supp[0] == 1 {
+		pos += 20
+	}
+
+	if pos+4 > len(supp) {
+		return 0, errors.New("truncated SUPP header")
+	}
+
+	count := int(binary.BigEndian.Uint32(supp[pos:]))
+	if count <= 0 || count > 1<<20 || pos+4+count*32 > len(supp) {
+		return 0, errors.New("invalid SUPP page count")
+	}
+
+	if absolutePage < 0 || absolutePage >= count {
+		return 0, errors.New("SUPP page key missing")
+	}
+
+	return pos + 4 + 32*absolutePage, nil
+}
+
+// armSupfRecordOffset locates the per-page record block of the slice with the
+// given cputype and subtype in a SUPF. Mirrors core.py arm_supf_record_offset,
 // but compares subtypes without their capability bits.
-func arm64SupfRecordOffset(supf []byte, requiredPages int, wantedSubtype uint32) (int, error) {
+func armSupfRecordOffset(supf []byte, requiredPages int, wantedCPU, wantedSubtype uint32) (int, error) {
 	if len(supf) < 12 || (supf[0] != 3 && supf[0] != 5) {
 		return 0, errors.New("unsupported SUPF format")
 	}
@@ -397,9 +471,9 @@ func arm64SupfRecordOffset(supf []byte, requiredPages int, wantedSubtype uint32)
 		}
 
 		pages := int(binary.BigEndian.Uint32(supf[pos+headerSize:]))
-		if cpu == cpuTypeARM64 && subtype&cpuSubtypeMask == wantedSubtype&cpuSubtypeMask {
+		if cpu == wantedCPU && subtype&cpuSubtypeMask == wantedSubtype&cpuSubtypeMask {
 			if pages < requiredPages || length < headerSize+pages*32 {
-				return 0, errors.New("SUPF arm64 page records are incomplete")
+				return 0, errors.New("SUPF page records are incomplete")
 			}
 
 			return pos + 4 + headerSize, nil
@@ -408,7 +482,7 @@ func arm64SupfRecordOffset(supf []byte, requiredPages int, wantedSubtype uint32)
 		pos += length + 4
 	}
 
-	return 0, errors.New("arm64 SUPF record missing")
+	return 0, fmt.Errorf("SUPF record missing for cputype=0x%x cpusubtype=0x%x", wantedCPU, wantedSubtype)
 }
 
 func sourceBlocks(wrapped []byte, absoluteIndex uint32) ([16]byte, [16]byte, [16]byte, error) {
@@ -502,23 +576,29 @@ func xor16(a [16]byte, b [16]byte) [16]byte {
 	return out
 }
 
-// decryptBinary decrypts every encrypted page of a Mach-O's arm64 slice and
-// clears cryptid. Mirrors core.py decrypt_binary, except that a fat binary is
-// thinned to that one slice (see arm64EncryptionInfo): the others (armv7, and
-// arm64e next to a plain arm64 slice) are dropped like the on-device helper
-// does. Returns the decrypted thin Mach-O and the number of pages processed;
-// errNotEncrypted if the slice is not encrypted.
+// decryptBinary decrypts every encrypted page of one slice of a Mach-O and
+// clears cryptid. supf holds either a SUPF (.supf/.v5.supf) or a SUPP
+// (.supp/.v4.supp). Mirrors core.py decrypt_binary, except that a fat binary
+// is thinned to that one slice (see armEncryptionInfo): the others are
+// dropped like the on-device helper does. Returns the decrypted thin Mach-O
+// and the number of pages processed; errNotEncrypted if the slice is not
+// encrypted.
 func decryptBinary(source, sinf, supf, credential []byte) ([]byte, int, error) {
-	info, err := arm64EncryptionInfo(source)
+	info, err := armEncryptionInfo(source)
 	if err != nil {
 		return nil, 0, err
 	}
 
 	pageCount := info.cryptSize / pageSize
+	firstPage := (info.base + info.cryptOff) / pageSize
+	pclass := len(supf) > 0 && (supf[0] == 1 || supf[0] == 4)
 
-	recordStart, err := arm64SupfRecordOffset(supf, pageCount, info.subtype)
-	if err != nil {
-		return nil, 0, err
+	recordStart := 0
+	if !pclass {
+		recordStart, err = armSupfRecordOffset(supf, pageCount, info.cpu, info.subtype)
+		if err != nil {
+			return nil, 0, err
+		}
 	}
 
 	work, err := deriveWork16(credential, sinf)
@@ -537,14 +617,22 @@ func decryptBinary(source, sinf, supf, credential []byte) ([]byte, int, error) {
 	copy(result, slice)
 
 	for localPage := range pageCount {
-		record := supf[recordStart+32*localPage : recordStart+32*(localPage+1)]
-		if len(record) != 32 {
-			return nil, 0, errors.New("truncated SUPF page record")
+		absoluteIndex := firstPage + localPage
+		if pclass {
+			recordStart, err = pclassPageKeyOffset(supf, absoluteIndex)
+			if err != nil {
+				return nil, 0, err
+			}
 		}
 
-		absoluteIndex := uint32((info.base+info.cryptOff)/pageSize + localPage)
+		if recordStart+32 > len(supf) {
+			return nil, 0, errors.New("truncated SUPF/SUPP page record")
+		}
 
-		key, err := derivePageKey(keyCipher, record[:16], absoluteIndex)
+		record := supf[recordStart : recordStart+32]
+		recordStart += 32
+
+		key, err := derivePageKey(keyCipher, record[:16], uint32(absoluteIndex))
 		if err != nil {
 			return nil, 0, err
 		}

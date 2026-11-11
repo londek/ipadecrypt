@@ -40,6 +40,7 @@ var (
 	decryptNoVerify       bool
 	decryptExtraVerify    bool
 	decryptSkipAppex      bool
+	decryptKeepWatch      bool
 	decryptVerbose        bool
 	decryptOnDevice       bool
 	decryptNoOnDevice     bool
@@ -84,7 +85,8 @@ func main() {
 	decrypt.Flags().StringVarP(&decryptOutput, "output", "o", "", "output path for the decrypted IPA (default: ./<bundleID>_<version>.decrypted.ipa)")
 	decrypt.Flags().BoolVar(&decryptNoVerify, "no-verify", false, "skip the post-decrypt Mach-O verification pass")
 	decrypt.Flags().BoolVar(&decryptExtraVerify, "extra-verify", false, "also byte-compare every output Mach-O against its source counterpart (outside the encrypted region) to catch decrypt corruption")
-	decrypt.Flags().BoolVar(&decryptSkipAppex, "skip-appex", false, "skip Payload/<App>.app/PlugIns/*.appex; extensions stay encrypted in the output IPA")
+	decrypt.Flags().BoolVar(&decryptSkipAppex, "skip-appex", false, "skip app extensions (*.appex); they stay encrypted in the output IPA")
+	decrypt.Flags().BoolVar(&decryptKeepWatch, "keep-watch", false, "keep and decrypt the Watch app instead of removing it from the output IPA (offline decryption only)")
 	decrypt.Flags().BoolVarP(&decryptVerbose, "verbose", "v", false, "print extra detail (e.g. the output path) during decryption")
 	decrypt.Flags().BoolVar(&decryptOnDevice, "on-device", false, "decrypt on the jailbroken device instead of offline")
 	decrypt.Flags().BoolVar(&decryptNoOnDevice, "no-on-device", false, "never fall back to the device; fail if offline decryption can't fully decrypt the app")
