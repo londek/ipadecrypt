@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	apphttp "github.com/londek/ipadecrypt/internal/apphttp"
 	"github.com/londek/ipadecrypt/internal/storeauth"
@@ -22,9 +23,15 @@ const maxCommerceRedirects = 4
 // allowlisted commerce URLs and with a fresh single-use proof for each hop.
 // Ported from ipatool v2.8.0 sendCommerceDownloadRequest.
 func (c *Client) sendCommerce(endpoint, g string, headers map[string]string, payload map[string]any, out *downloadResult) (*http.Response, error) {
-	hardwareID, err := hex.DecodeString(g)
-	if err != nil || len(hardwareID) != 6 {
-		return nil, errors.New("store download requires a six-byte device GUID")
+	var hardwareID []byte
+
+	if c.anisette == nil {
+		var err error
+
+		hardwareID, err = hex.DecodeString(g)
+		if err != nil || len(hardwareID) != 6 {
+			return nil, errors.New("store download requires a six-byte device GUID")
+		}
 	}
 
 	headers["User-Agent"] = storeUserAgent
@@ -80,6 +87,12 @@ func (c *Client) sendCommerce(endpoint, g string, headers map[string]string, pay
 func (c *Client) storeAMDProof(ctx context.Context, endpoint string, hardwareID []byte) (map[string]string, error) {
 	if !isStoreAMDCommerceURL(endpoint) {
 		return nil, errors.New("store AMD proof endpoint is not allowlisted")
+	}
+
+	// Snapshot sign-in uses the captured iPhone identity; it has no local
+	// Store provisioning state to rotate.
+	if c.anisette != nil {
+		return c.anisette.Headers(time.Now())
 	}
 
 	c.authMu.Lock()

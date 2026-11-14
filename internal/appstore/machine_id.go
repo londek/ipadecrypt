@@ -25,3 +25,13 @@ func machineIdentity(macAddress string) (string, []byte, error) {
 
 	return guid, machineID, nil
 }
+
+// DefaultMachineIdentity returns the store GUID and signing machine ID for this host.
+func DefaultMachineIdentity() (string, []byte, error) {
+	mac, err := macAddress()
+	if err != nil {
+		return "", nil, err
+	}
+
+	return machineIdentity(mac)
+}

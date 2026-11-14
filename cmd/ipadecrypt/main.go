@@ -7,6 +7,7 @@ import (
 	"runtime/debug"
 
 	"github.com/londek/ipadecrypt/internal/config"
+	"github.com/londek/ipadecrypt/internal/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -54,10 +55,11 @@ var (
 
 func main() {
 	root := &cobra.Command{
-		Use:     "ipadecrypt",
-		Short:   "End-to-end FairPlay decrypter for App Store apps",
-		Long:    "ipadecrypt is an end-to-end suite for decrypting encrypted IPAs from the App Store with minimal user interaction.\n\nRun `ipadecrypt bootstrap` first to sign in and verify your device.",
-		Version: resolveVersion(),
+		SilenceErrors: true,
+		Use:           "ipadecrypt",
+		Short:         "End-to-end FairPlay decrypter for App Store apps",
+		Long:          "ipadecrypt is an end-to-end suite for decrypting encrypted IPAs from the App Store with minimal user interaction.\n\nRun `ipadecrypt bootstrap` to choose a Store sign-in method and prepare a decryption credential.",
+		Version:       resolveVersion(),
 	}
 
 	root.PersistentFlags().StringVar(&rootDirOverride, "root-dir", "",
@@ -66,20 +68,24 @@ func main() {
 		"redact sensitive identifiers (Apple ID email, storefront) from output")
 
 	bootstrap := &cobra.Command{
-		Use:   "bootstrap",
-		Short: "Interactive setup. App Store sign-in and one-time credential minting",
-		Run:   bootstrapHandler,
+		Use:          "bootstrap",
+		Short:        "Choose a Store sign-in method and prepare a decryption credential",
+		RunE:         bootstrapHandler,
+		SilenceUsage: true,
 	}
-	bootstrap.Flags().BoolVar(&bootstrapReset, "reset", false, "forget cached credentials and re-prompt")
-	bootstrap.Flags().BoolVar(&bootstrapSkipLogin, "skip-login", false, "do not login to the App Store. ipadecrypt won't be able to use any App Store related features")
-	bootstrap.Flags().BoolVar(&bootstrapRemint, "remint", false, "re-run credential minting even if one is already cached for the account")
+	bootstrap.Flags().StringVar(&bootstrapFlow, "flow", "", "setup flow: original, snapshot or mac (prompted by default)")
+	bootstrap.Flags().BoolVar(&bootstrapReset, "reset", false, "re-prompt sign-in (device flows also reset its saved account/device settings)")
+	bootstrap.Flags().BoolVar(&bootstrapSkipLogin, "skip-login", false, "skip network login; Mac setup requires an existing Mac session")
+	bootstrap.Flags().BoolVar(&bootstrapRemint, "remint", false, "repeat credential mint/recovery even if one is cached")
 
 	decrypt := &cobra.Command{
-		Use:   "decrypt <bundle-id|app-store-id|app-store-url|path-to-local-ipa>",
-		Short: "Download (or read a local .ipa) and decrypt an app offline by bundle ID, App Store ID, or App Store URL",
-		Args:  cobra.ExactArgs(1),
-		Run:   decryptHandler,
+		Use:          "decrypt <bundle-id|app-store-id|app-store-url|path-to-local-ipa>",
+		Short:        "Download (or read a local .ipa) and decrypt an app offline by bundle ID, App Store ID, or App Store URL",
+		Args:         cobra.ExactArgs(1),
+		RunE:         decryptSelectedFlow,
+		SilenceUsage: true,
 	}
+	decrypt.Flags().BoolVar(&decryptRefreshTicket, "refresh-ticket", false, "Mac flow: request a fresh download ticket")
 	decrypt.Flags().StringVar(&decryptExtVerID, "external-version-id", "", "pin to a specific historical App Store version")
 	decrypt.Flags().StringVar(&decryptStorefront, "storefront", "", "override App Store storefront (numeric ID or two-letter country code, e.g. 143441 or US)")
 	decrypt.Flags().StringVarP(&decryptOutput, "output", "o", "", "output path for the decrypted IPA (default: ./<bundleID>_<version>.decrypted.ipa)")
@@ -99,7 +105,7 @@ func main() {
 		Short: "Browse the App Store version history of an app",
 		Long:  "Opens an interactive table of every App Store release of the given app. Metadata for the 3 newest versions is fetched eagerly; older versions are fetched on-demand (Enter on a row) and cached on disk.",
 		Args:  cobra.ExactArgs(1),
-		Run:   versionsHandler,
+		RunE:  versionsSelectedFlow,
 	}
 	versions.Flags().StringVar(&versionsStorefront, "storefront", "", "override App Store storefront (numeric ID or two-letter country code, e.g. 143441 or US)")
 	versions.Flags().BoolVar(&versionsLogResponses, "log-responses", false, "append each API response as a JSONL record to ~/.ipadecrypt/logs/versions.log")
@@ -107,6 +113,10 @@ func main() {
 	root.AddCommand(bootstrap, decrypt, versions)
 
 	if err := root.Execute(); err != nil {
+		if !errors.Is(err, errCommandReported) {
+			tui.Err("%v", err)
+		}
+
 		os.Exit(1)
 	}
 }
@@ -134,6 +144,13 @@ func loadConfigOrDefault(rootDir string) (*config.Config, *config.Paths, error) 
 		}
 
 		return nil, nil, fmt.Errorf("load config: %w", err)
+	}
+
+	// Explicit selections must not be overridden by a stale anisette mode.
+	if cfg.Flow == flowOriginal || cfg.Flow == flowSnapshot {
+		if err := applyDeviceFlow(cfg, cfg.Flow); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	return cfg, paths, nil

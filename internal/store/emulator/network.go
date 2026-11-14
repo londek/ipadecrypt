@@ -600,6 +600,14 @@ func (r *Runtime) networkMessage(receiver uint64, class, selector string, meta b
 			r.set(r.New("NSArray", items))
 
 			return true
+		case "setPercentEncodedQuery:":
+			u.RawQuery = ""
+			u.ForceQuery = r.arg(2) != 0
+			if r.arg(2) != 0 {
+				u.RawQuery = r.String(r.arg(2))
+			}
+			r.set(0)
+			return true
 		case "setQueryItems:", "setPercentEncodedQueryItems:":
 			parts := []string{}
 

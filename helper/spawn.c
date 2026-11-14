@@ -108,7 +108,7 @@ static void emit_csflags(pid_t pid) {
 // Mach-freeze, then detach - the target stays frozen (suspend count) while
 // CS_DEBUGGED persists for the rest of the decrypt. No-op effect on
 // Dopamine (iOS 16), which bypasses AMFI wholesale; failure here is
-// non-fatal (we just keep the prior behavior).
+// non-fatal (decryption proceeds without CS_DEBUGGED).
 static void cs_mark_debugged(task_t task, pid_t pid) {
     // Only strict-CS jailbreaks need this. When CS_HARD/CS_KILL are set
     // (checkm8 / palera1n iOS 15.x) executing a COW-modified dyld page is a

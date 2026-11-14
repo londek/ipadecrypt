@@ -3,7 +3,7 @@ package profilegen
 import "encoding/binary"
 
 // pageReference tracks an ADRP-derived address within a basic block. Unresolved
-// uses retain the old conservative window; understood address arithmetic and
+// uses retain a conservative window; understood address arithmetic and
 // memory operands retain only the pages they actually address.
 type pageReference struct {
 	address  uint64

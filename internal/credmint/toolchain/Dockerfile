@@ -1,7 +1,6 @@
 # ipadecrypt credmint toolchain: builds the arm64 iOS credential-mint programs
 # on Linux (clang -> arm64-apple-ios, ldid for ad-hoc signing, iPhoneOS SDK).
-# Unlike the old helper image this keeps System/Library/Frameworks, because the
-# device programs link CoreFoundation and IOKit.
+# System/Library/Frameworks supplies CoreFoundation and IOKit for device programs.
 
 ARG DEBIAN_TAG=bookworm-slim
 ARG LLVM_VERSION=18

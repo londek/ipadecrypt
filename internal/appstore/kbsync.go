@@ -3,9 +3,9 @@ package appstore
 import (
 	"context"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"sync"
@@ -77,7 +77,12 @@ func (c *Client) entDownload(acc *Account, app App, g, externalVersionID string)
 		return downloadItem{}, false, nil
 	}
 
-	hardwareID, err := hex.DecodeString(g)
+	machineAddress, err := macAddress()
+	if err != nil {
+		return downloadItem{}, false, nil
+	}
+
+	hardwareID, err := net.ParseMAC(machineAddress)
 	if err != nil || len(hardwareID) != 6 {
 		return downloadItem{}, false, nil
 	}

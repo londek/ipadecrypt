@@ -16,6 +16,7 @@ import (
 	"github.com/londek/ipadecrypt/internal/appstore"
 	"github.com/londek/ipadecrypt/internal/config"
 	"github.com/londek/ipadecrypt/internal/fairplay"
+	"github.com/londek/ipadecrypt/internal/iphonesetup"
 	"github.com/londek/ipadecrypt/internal/pipeline"
 	"github.com/londek/ipadecrypt/internal/tui"
 	"github.com/londek/ipadecrypt/internal/updater"
@@ -228,7 +229,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 			return
 		}
 
-		as, err := appstore.New(filepath.Join(paths.Root, "cookies"))
+		as, err := iphonesetup.NewClient(cfg, paths)
 		if err != nil {
 			tui.Err("appstore client: %v", err)
 			return
@@ -293,7 +294,7 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 
 			if errors.Is(err, appstore.ErrModernDownloadUnsupported) {
 				live.Fail("can't download this build from the App Store yet")
-				tui.Info("Apple now requires device attestation for this app's current build; its download endpoints answer HTTP 403.")
+				tui.Info("Apple requires device attestation for this app's current build; its download endpoints answer HTTP 403.")
 				tui.Info("ipadecrypt doesn't implement that yet. Decrypt a local .ipa instead: `ipadecrypt decrypt <file>.ipa`")
 
 				return
@@ -577,9 +578,18 @@ func fetchRemoteEncryptedSource(cfg *config.Config, paths *config.Paths, as *app
 		}
 	}
 
-	ticket, err := withAuth(cfg, as, app, 3, onAuth, func() (appstore.DownloadTicket, error) {
-		return as.PrepareDownload(cfg.Apple.Account(), app, extVerID)
-	})
+	var (
+		ticket appstore.DownloadTicket
+		err    error
+	)
+	if cfg.Anisette.Mode == config.AnisetteModeOffline && extVerID == "" {
+		ticket, err = (iphonesetup.Setup{PromptDevice: promptMintDevice}).PurchaseTicket(cfg, app)
+	} else {
+		ticket, err = withAuth(cfg, as, app, 3, onAuth, func() (appstore.DownloadTicket, error) {
+			return as.PrepareDownload(cfg.Apple.Account(), app, extVerID)
+		})
+	}
+
 	if err != nil {
 		return remoteSourceDisposition{}, err
 	}

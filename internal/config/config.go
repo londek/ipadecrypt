@@ -15,12 +15,25 @@ const SchemaVersion = 2
 
 type Config struct {
 	Version     int         `json:"version"`
+	Flow        string      `json:"flow,omitempty"`
 	Apple       Apple       `json:"apple"`
 	Device      Device      `json:"device"`
+	Anisette    Anisette    `json:"anisette,omitzero"`
 	Versions    Versions    `json:"versions,omitempty"`
 	UpdateCheck UpdateCheck `json:"updateCheck,omitzero"`
 
 	path string
+}
+
+const (
+	AnisetteModeFramework = "framework"
+	AnisetteModeOffline   = "offline"
+)
+
+type Anisette struct {
+	Mode       string `json:"mode,omitempty"`
+	Snapshot   string `json:"snapshot,omitempty"`
+	StaticFile string `json:"staticFile,omitempty"`
 }
 
 type UpdateCheck struct {
@@ -38,6 +51,8 @@ type Apple struct {
 	Email                       string `json:"email,omitempty"`
 	Password                    string `json:"password,omitempty"`
 	PasswordToken               string `json:"passwordToken,omitempty"`
+	PasswordEquivalentToken     string `json:"passwordEquivalentToken,omitempty"`
+	ADSID                       string `json:"adSid,omitempty"`
 	DirectoryServicesIdentifier string `json:"directoryServicesIdentifier,omitempty"`
 	StoreFront                  string `json:"storeFront,omitempty"`
 	Pod                         string `json:"pod,omitempty"`
@@ -54,12 +69,14 @@ func (a Apple) Account() *appstore.Account {
 	}
 
 	return &appstore.Account{
-		Email:               a.Email,
-		Password:            a.Password,
-		PasswordToken:       a.PasswordToken,
-		DirectoryServicesID: a.DirectoryServicesIdentifier,
-		StoreFront:          storeFront,
-		Pod:                 a.Pod,
+		Email:                   a.Email,
+		Password:                a.Password,
+		PasswordToken:           a.PasswordToken,
+		PasswordEquivalentToken: a.PasswordEquivalentToken,
+		ADSID:                   a.ADSID,
+		DirectoryServicesID:     a.DirectoryServicesIdentifier,
+		StoreFront:              storeFront,
+		Pod:                     a.Pod,
 	}
 }
 
@@ -67,6 +84,8 @@ func (a *Apple) SetAccount(acc *appstore.Account) {
 	a.Email = acc.Email
 	a.Password = acc.Password
 	a.PasswordToken = acc.PasswordToken
+	a.PasswordEquivalentToken = acc.PasswordEquivalentToken
+	a.ADSID = acc.ADSID
 	a.DirectoryServicesIdentifier = acc.DirectoryServicesID
 	a.StoreFront = acc.StoreFront
 	a.Pod = acc.Pod
@@ -115,9 +134,7 @@ func Load(path string) (*Config, error) {
 		migrateAppleV1ToV2(data, &cfg.Apple)
 		cfg.Version = 2
 
-		// Persist the migrated shape so subsequent loads are clean and
-		// the old apple.account.* nested object stops shadowing the new
-		// flat fields if anyone hand-edits the file.
+		// Persist flat fields so apple.account.* cannot shadow manual edits.
 		if err := cfg.Save(); err != nil {
 			return nil, fmt.Errorf("save migrated config: %w", err)
 		}

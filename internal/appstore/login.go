@@ -38,6 +38,8 @@ type loginDialog struct {
 }
 
 type loginResult struct {
+	Status              int         `plist:"status,omitempty"`
+	JingleDocType       string      `plist:"jingleDocType,omitempty"`
 	FailureType         string      `plist:"failureType,omitempty"`
 	CustomerMessage     string      `plist:"customerMessage,omitempty"`
 	DirectoryServicesID string      `plist:"dsPersonId,omitempty"`
@@ -254,7 +256,7 @@ func (c *Client) legacyLogin(login loginRequest, proof loginProof) (*Account, er
 		out loginResult
 	)
 
-	for attempt, redirects := 1, 0; ; {
+	for attempt, redirects, edgeRetries := 1, 0, 0; ; {
 		headers, err := proof(endpoint)
 		if err != nil {
 			return nil, err
@@ -303,8 +305,17 @@ func (c *Client) legacyLogin(login loginRequest, proof loginProof) (*Account, er
 		}
 
 		if err != nil {
+			if errors.Is(err, ErrEdgeRejected) && edgeRetries < len(authEdgeRetryDelays) {
+				authSleep(authEdgeRetryDelays[edgeRetries])
+				edgeRetries++
+
+				continue
+			}
+
 			return nil, fmt.Errorf("login: %w", err)
 		}
+
+		edgeRetries = 0
 
 		retry, err := interpretLogin(res, &out, attempt, login.authCode)
 		if err != nil {

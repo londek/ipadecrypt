@@ -1,9 +1,39 @@
 package appstore
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"testing"
+	"time"
 )
+
+func TestStoreAMDUsesSnapshotWithoutProvisioningState(t *testing.T) {
+	calls := 0
+	providerErr := errors.New("snapshot unavailable")
+	client := &Client{anisette: nativeProviderFunc(func(time.Time) (map[string]string, error) {
+		calls++
+		if calls == 2 {
+			return nil, providerErr
+		}
+
+		return map[string]string{"X-Apple-AMD": "snapshot-proof", "X-Apple-AMD-M": "snapshot-mid"}, nil
+	})}
+	endpoint := "https://downloaddispatch.itunes.apple.com/r/redownload?guid=phone-udid"
+
+	headers, err := client.storeAMDProof(context.Background(), endpoint, nil)
+	if err != nil || headers["X-Apple-AMD"] != "snapshot-proof" || headers["X-Apple-AMD-M"] != "snapshot-mid" {
+		t.Fatalf("snapshot proof: %v, %v", headers, err)
+	}
+
+	if _, err := client.storeAMDProof(context.Background(), endpoint, nil); !errors.Is(err, providerErr) {
+		t.Fatalf("snapshot failure = %v", err)
+	}
+
+	if _, err := client.storeAMDProof(context.Background(), "https://example.com/", nil); err == nil || calls != 2 {
+		t.Fatalf("untrusted endpoint reached provider: calls=%d err=%v", calls, err)
+	}
+}
 
 func TestStoreAMDAllowlistAndDSIDFallback(t *testing.T) {
 	for url, want := range map[string]bool{

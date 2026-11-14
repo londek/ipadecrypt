@@ -214,13 +214,22 @@ func PromptPassword(label string) (string, error) {
 // Enter confirms, Ctrl-C aborts. Falls back to the first option when stdin
 // isn't a TTY.
 func Select(label string, options []string) (int, error) {
+	return SelectDefault(label, options, 0)
+}
+
+// SelectDefault is Select with an initial selection.
+func SelectDefault(label string, options []string, defaultIndex int) (int, error) {
 	if len(options) == 0 {
 		return -1, fmt.Errorf("select: no options")
 	}
 
+	if defaultIndex < 0 || defaultIndex >= len(options) {
+		defaultIndex = 0
+	}
+
 	fd := int(os.Stdin.Fd())
 	if !term.IsTerminal(fd) {
-		return 0, nil
+		return defaultIndex, nil
 	}
 
 	old, err := term.MakeRaw(fd)
@@ -229,7 +238,7 @@ func Select(label string, options []string) (int, error) {
 	}
 	defer term.Restore(fd, old)
 
-	cursor := 0
+	cursor := defaultIndex
 	draw := func(first bool) {
 		if !first {
 			fmt.Fprintf(Out, "\x1b[%dA", len(options)+1)

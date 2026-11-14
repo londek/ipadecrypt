@@ -9,7 +9,7 @@ dist/
 .DS_Store
 ipatool-sessions/
 
-# Vendored reference clones (untracked research sources)
+# Local reference checkouts
 fairplay-decrypt/
 ipatool/
 .serena/

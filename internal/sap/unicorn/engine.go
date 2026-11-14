@@ -65,6 +65,17 @@ type api struct {
 	hookDel  func(uintptr, uintptr) int32
 }
 
+// FlushTranslationCache discards translated code after demand-loaded executable
+// bytes replace a placeholder page. UC_CTL_TB_FLUSH has no variadic arguments.
+func (e *Engine) FlushTranslationCache() error {
+	handle, done, err := e.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer done()
+	return e.err(e.api.ctl(handle, 10|1<<30, 0))
+}
+
 type Engine struct {
 	memoryGuard *memoryGuard
 	api         api

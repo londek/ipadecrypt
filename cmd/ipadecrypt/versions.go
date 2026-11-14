@@ -12,6 +12,7 @@ import (
 
 	"github.com/londek/ipadecrypt/internal/appstore"
 	"github.com/londek/ipadecrypt/internal/config"
+	"github.com/londek/ipadecrypt/internal/iphonesetup"
 	"github.com/londek/ipadecrypt/internal/tui"
 	"github.com/londek/ipadecrypt/internal/updater"
 	"github.com/spf13/cobra"
@@ -73,7 +74,7 @@ func versionsHandler(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	as, err := appstore.New(filepath.Join(paths.Root, "cookies"))
+	as, err := iphonesetup.NewClient(cfg, paths)
 	if err != nil {
 		tui.Err("appstore client: %v", err)
 		return
@@ -235,9 +236,7 @@ type cachedVersion struct {
 }
 
 // reconcileFromRaw fills typed fields from Raw when they're missing.
-// This is how we migrate cache entries written before a typed field
-// was introduced: the Raw dict still has the data, we just didn't
-// copy it out at the time.
+// Raw values provide compatibility with cache entries that omit typed fields.
 func (v *cachedVersion) reconcileFromRaw() {
 	if v.Raw == nil {
 		return

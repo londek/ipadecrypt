@@ -3,6 +3,7 @@ package appstore
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -64,11 +65,18 @@ func (c *Client) sendRequest(op string, req apphttp.Request, format responseForm
 		return nil, fmt.Errorf("save cookies: %w", err)
 	}
 
+	if debugEnabled() {
+		debugf("%s %s -> %s", op, url, apphttp.DescribeResponse(res))
+	}
+
 	if res.StatusCode == http.StatusTooManyRequests {
 		return res, fmt.Errorf("rate limited by Apple (HTTP %d)", res.StatusCode)
 	}
 
-	if out == nil {
+	// Redirect bodies are HTML stubs; callers act on the status and Location.
+	isRedirect := res.StatusCode >= http.StatusMultipleChoices && res.StatusCode < http.StatusBadRequest
+
+	if out == nil || isRedirect {
 		io.Copy(io.Discard, res.Body)
 		return res, nil
 	}
@@ -82,13 +90,33 @@ func (c *Client) sendRequest(op string, req apphttp.Request, format responseForm
 		debugf("%s -> status=%d body=%s", url, res.StatusCode, truncateBody(data, 1500))
 	}
 
+	// Provisioning actions and valid plist replies take precedence over the
+	// routing-header heuristic; newer Store responses may omit those markers.
+	if op == "authenticate" && authenticationMachineAction(res.Header) == nil &&
+		!looksLikePlist(normalizePlist(data)) {
+		if err := authenticateLayerError(res); err != nil {
+			return res, err
+		}
+	}
+
 	switch format {
 	case formatJSON:
 		if err := json.Unmarshal(data, out); err != nil {
 			return nil, fmt.Errorf("decode json: %w", err)
 		}
 	case formatXML:
-		if _, err := plist.Unmarshal(normalizePlist(data), out); err != nil {
+		normalized := normalizePlist(data)
+		if !looksLikePlist(normalized) {
+			return res, &ResponseDecodeError{
+				Cause:       errors.New("response is not a property list"),
+				StatusCode:  res.StatusCode,
+				ContentType: res.Header.Get("Content-Type"),
+				Body:        truncateBody(data, 500),
+				URLs:        extractURLs(data),
+			}
+		}
+
+		if _, err := plist.Unmarshal(normalized, out); err != nil {
 			return res, &ResponseDecodeError{
 				Cause:       err,
 				StatusCode:  res.StatusCode,
@@ -100,6 +128,28 @@ func (c *Client) sendRequest(op string, req apphttp.Request, format responseForm
 	}
 
 	return res, nil
+}
+
+// looksLikePlist reports whether body is plausibly a property list: a binary
+// bplist, or XML that contains a plist/dict/array/key element. HTML error
+// stubs (e.g. an nginx 404 page) fail this, so they never reach the parser.
+func looksLikePlist(body []byte) bool {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return false
+	}
+
+	if bytes.HasPrefix(trimmed, []byte("bplist")) {
+		return true
+	}
+
+	for _, marker := range [][]byte{[]byte("<plist"), []byte("<dict"), []byte("<array"), []byte("<key")} {
+		if bytes.Contains(trimmed, marker) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func apphttpFormat(f responseFormat) apphttp.ResponseFormat {

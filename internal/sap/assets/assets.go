@@ -110,6 +110,13 @@ func Load(ctx context.Context) (Bundle, error) {
 }
 
 func load(ctx context.Context) (Bundle, error) {
+	// ipatool caches the same pinned images as verified arm64 slices. Reuse
+	// those public assets without copying account state or downloading again.
+	if root, err := os.UserCacheDir(); err == nil {
+		if bundle, err := readCompactCache(filepath.Join(root, "ipatool", "sap", "apple-assets-macos-27-26A434-arm64-v5")); err == nil {
+			return bundle, nil
+		}
+	}
 	directory, err := cacheDirectory()
 	if err != nil {
 		return Bundle{}, err

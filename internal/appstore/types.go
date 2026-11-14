@@ -3,13 +3,15 @@ package appstore
 import "errors"
 
 type Account struct {
-	Email               string `json:"email"`
-	PasswordToken       string `json:"passwordToken"`
-	DirectoryServicesID string `json:"directoryServicesIdentifier"`
-	StoreFront          string `json:"storeFront"`
-	Password            string `json:"password"`
-	Pod                 string `json:"pod"`
-	Name                string `json:"name"`
+	Email                   string `json:"email"`
+	PasswordToken           string `json:"passwordToken"`
+	PasswordEquivalentToken string `json:"passwordEquivalentToken,omitempty"`
+	ADSID                   string `json:"adSid,omitempty"`
+	DirectoryServicesID     string `json:"directoryServicesIdentifier"`
+	StoreFront              string `json:"storeFront"`
+	Password                string `json:"password"`
+	Pod                     string `json:"pod"`
+	Name                    string `json:"name"`
 }
 
 type App struct {
