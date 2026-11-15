@@ -7,6 +7,7 @@ import (
 
 	"github.com/londek/ipadecrypt/internal/appstore"
 	"github.com/londek/ipadecrypt/internal/config"
+	"github.com/londek/ipadecrypt/internal/iphonesetup"
 )
 
 // authEvent names recovery steps that withAuth takes so callers can
@@ -26,7 +27,17 @@ func reauth(cfg *config.Config, as *appstore.Client) error {
 		return errors.New("re-auth: no stored account; run `ipadecrypt bootstrap`")
 	}
 
-	acc, err := as.Login(cfg.Apple.Email, cfg.Apple.Password, "")
+	signing, err := (iphonesetup.Setup{PromptDevice: promptMintDevice}).PrepareSigning(cfg)
+	if err != nil {
+		return fmt.Errorf("re-auth: prepare native signing: %w", err)
+	}
+	defer signing.Close()
+
+	if err := signing.Configure(as); err != nil {
+		return err
+	}
+
+	acc, err := as.SignIn(cfg.Apple.Email, cfg.Apple.Password, "")
 	if err != nil {
 		return fmt.Errorf("re-auth: %w", err)
 	}

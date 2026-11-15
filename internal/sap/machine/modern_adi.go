@@ -47,13 +47,14 @@ func OpenModernADI(ctx context.Context, bundle assets.Bundle, identifier, state 
 		return nil, errors.New("modern ADI host UUID must be 16 bytes")
 	}
 
-	runtime, _, err := openRuntime(ctx, bundle, runtimeOptions{
+	runtime, exports, err := openRuntime(ctx, bundle, runtimeOptions{
 		extraImages: []imageSpec{{name: "commerce", data: bundle.Commerce, base: storeAgentBase}},
 		shims:       shimOptions{zeroReturnAliases: storeAgentZeroReturnAliases},
 	})
 	if err != nil {
 		return nil, err
 	}
+	runtime.entry.dispose = exports["_jEHf8Xzsv8K"]
 
 	ready := false
 
@@ -198,13 +199,21 @@ func (a *ModernADI) initializeFairPlayKernel() error {
 }
 
 func (a *ModernADI) ImportKeyBag(hardwareID, keyBag []byte) error {
+	global, err := a.keyBagContext(hardwareID)
+	if err != nil {
+		return err
+	}
+	return a.importKeyBag(global, keyBag)
+}
+
+func (a *ModernADI) keyBagContext(hardwareID []byte) (uint32, error) {
 	if a == nil || a.runtime == nil {
-		return errors.New("modern ADI runtime is unavailable")
+		return 0, errors.New("modern ADI runtime is unavailable")
 	}
 
 	hardware, err := hardwareBlock(hardwareID)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	a.runtime.beginCall()
@@ -213,45 +222,54 @@ func (a *ModernADI) ImportKeyBag(hardwareID, keyBag []byte) error {
 
 	hardwareAddress, err := a.runtime.scratch(hardware, uint64(len(hardware)))
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	path := append([]byte(storeAgentSCInfoPath), 0)
 
 	pathAddress, err := a.runtime.scratch(path, uint64(len(path)))
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	contextField, err := a.runtime.scratch(nil, 4)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	status, err := a.runtime.invoke(storeAgentGlobalInit, 0, hardwareAddress, pathAddress, contextField)
 	if err != nil {
-		return fmt.Errorf("initialize FairPlay keybag context: %w", err)
+		return 0, fmt.Errorf("initialize FairPlay keybag context: %w", err)
 	}
 
 	if int32(status) != 0 {
-		return fmt.Errorf("initialize FairPlay keybag context: status %d", int32(status))
+		return 0, fmt.Errorf("initialize FairPlay keybag context: status %d", int32(status))
 	}
 
 	global, err := a.runtime.readUint32(contextField)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	if global == 0 {
-		return errors.New("initialize FairPlay keybag context: null context")
+		return 0, errors.New("initialize FairPlay keybag context: null context")
 	}
+	return global, nil
+}
+
+func (a *ModernADI) importKeyBag(global uint32, keyBag []byte) error {
+	if len(keyBag) == 0 || len(keyBag) > 1<<20 {
+		return errors.New("invalid FairPlay keybag size")
+	}
+	a.runtime.beginCall()
+	defer a.runtime.clearScratch()
 
 	keyBagAddress, err := a.runtime.scratch(keyBag, uint64(len(keyBag)))
 	if err != nil {
 		return err
 	}
 
-	status, err = a.runtime.invoke(modernKeyBagEntry, uint64(global), keyBagAddress, uint64(len(keyBag)))
+	status, err := a.runtime.invoke(modernKeyBagEntry, uint64(global), keyBagAddress, uint64(len(keyBag)))
 	if err != nil {
 		return fmt.Errorf("import FairPlay keybag: %w", err)
 	}

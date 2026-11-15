@@ -384,6 +384,42 @@ func decryptInstalledBundle(dev *device.Client, cleanups *cleanupStack, helperPa
 		return err
 	}
 
+	if len(res.StillEncrypted) > 0 && len(res.AllZeroCrypt) == 0 && len(res.Mismatches) == 0 {
+		live.Fail("%d slice(s) still encrypted after host-side assembly", len(res.StillEncrypted))
+		tui.Info("retrying with the installed bundle, including binaries already decrypted on disk")
+
+		if err := outFile.Truncate(0); err != nil {
+			return fmt.Errorf("truncate direct output: %w", err)
+		}
+
+		if _, err := outFile.Seek(0, io.SeekStart); err != nil {
+			return fmt.Errorf("rewind direct output: %w", err)
+		}
+
+		progress = &helperProgress{}
+		cw = &countingWriter{w: outFile, onTick: func(n int64) {
+			live.Message("writing IPA → %s", humanBytes(n))
+		}}
+
+		code, err := dev.RunHelper(helperPath, bundleID, bundlePath, decryptVerbose, decryptSkipAppex, onEvent, cw)
+		if err != nil {
+			return fmt.Errorf("direct helper run: %w", err)
+		}
+
+		if code != 0 {
+			return fmt.Errorf("direct helper exit %d", code)
+		}
+
+		if err := outFile.Sync(); err != nil {
+			return fmt.Errorf("sync direct output: %w", err)
+		}
+
+		res, err = pipeline.Verify(outLocal, src, decryptSkipAppex)
+		if err != nil {
+			return fmt.Errorf("verify direct output: %w", err)
+		}
+	}
+
 	if !res.OK() {
 		live.Fail("verify failed: %s", verifyFailureSummary(res))
 
@@ -459,10 +495,6 @@ func buildInstallPlan(dev *device.Client, uploadPath, bundleID string) (installP
 		return installPlan{}, fmt.Errorf("locate appinst: %w", err)
 	}
 
-	if appinstPath == "" {
-		return installPlan{}, errAppinstNotFound
-	}
-
 	bundlePath, _, err := dev.FindInstalledByBundleID(bundleID)
 	if err != nil {
 		return installPlan{}, fmt.Errorf("scan installed: %w", err)
@@ -515,12 +547,25 @@ func ensureInstalledBundle(dev *device.Client, plan installPlan, uploadPath stri
 		previousVersion = ""
 	}
 
+	if plan.appinstPath == "" {
+		_, sourceVersion, sourceErr := pipeline.AppInfo(uploadPath)
+		if sourceErr == nil && previousVersion == sourceVersion {
+			return installResult{bundlePath: plan.bundlePath}, nil
+		}
+
+		return installResult{}, errAppinstNotFound
+	}
+
 	notify(installReplaceInstalled)
 
 	return installUploadedBundle(dev, plan, uploadPath, true, previousVersion, notify, onProgress)
 }
 
 func installUploadedBundle(dev *device.Client, plan installPlan, uploadPath string, reinstalled bool, previousVersion string, notify func(installEvent), onProgress func(cur, total int64)) (installResult, error) {
+	if plan.appinstPath == "" {
+		return installResult{}, errAppinstNotFound
+	}
+
 	notify(installUpload)
 
 	src, err := os.Open(uploadPath)

@@ -35,7 +35,7 @@ type urlBag struct {
 // endpoints it carries do not need the authenticate-specific SAP validation,
 // so this is kept separate from bag() and reused by the download chain.
 func (c *Client) fetchURLBag() (urlBag, error) {
-	g, err := guid()
+	g, err := c.guid()
 	if err != nil {
 		return urlBag{}, err
 	}
@@ -102,9 +102,8 @@ func (c *Client) bag() (SAPConfig, error) {
 		return SAPConfig{}, fmt.Errorf("bag: parse authentication endpoint: %w", err)
 	}
 
-	// The legacy bare MZFinance path returns unusable responses (204/301/HTML);
-	// Apple only answers it on the slashed path. The native endpoint keeps its own.
-	if strings.HasSuffix(strings.ToLower(authEndpoint.Hostname()), "buy."+iTunesDomain) {
+	// Keep native endpoints unchanged; the legacy Store path defaults to a trailing slash.
+	if isStoreBuyHost(strings.ToLower(authEndpoint.Hostname())) {
 		authEndpoint.Path = PrivateAppStoreAPIPathAuth + "/"
 	}
 

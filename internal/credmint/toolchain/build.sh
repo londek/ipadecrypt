@@ -1,7 +1,7 @@
 #!/bin/sh
 # Build the signed arm64 iOS credential-mint programs inside the pinned Docker
-# toolchain and drop them (plus the data blobs) into internal/credmint/bundle/,
-# replacing the committed placeholders. Reproducible on any Linux/macOS host
+# toolchain and write them with the data blobs to internal/credmint/bundle/.
+# Reproducible on any Linux/macOS host
 # with Docker - no Xcode or macOS SDK required.
 #
 # Usage:

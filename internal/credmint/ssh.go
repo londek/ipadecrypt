@@ -341,7 +341,7 @@ func (d *sshDevice) asRoot(sess *ssh.Session, cmd string, stdin []byte) string {
 
 	sess.Stdin = io.MultiReader(strings.NewReader(d.sudoPassword+"\n"), bytes.NewReader(stdin))
 
-	return "sudo -S -p '' sh -c " + shellQuote(cmd)
+	return "PATH=/var/jb/usr/bin:/usr/bin:$PATH sudo -S -p '' sh -c " + shellQuote(cmd)
 }
 
 // run executes cmd as root and returns stdout, erroring (with combined

@@ -1,6 +1,6 @@
 # Building ipadecrypt
 
-ipadecrypt has three parts:
+ipadecrypt has four parts:
 
 - **`ipadecrypt` CLI** - Go binary that runs on your computer. This is all you
   need for everyday development and for decrypting apps.
@@ -14,13 +14,21 @@ ipadecrypt has three parts:
   `helper/`). Pushed to a jailbroken device only for the on-device fallback that
   decrypts apps the offline decryptor can't handle.
 
+- **iPhone snapshot agents** - embedded JavaScript executed by Frida on the
+  jailbroken device for state capture, native signing and Store operations.
+  Bootstrap deploys the pinned Frida runtime automatically. Rebuilding the
+  agents requires Node.js; normal Go builds use the committed bundles. See
+  [the agent instructions](internal/anisettecapture/agent/README.md).
+
 ## Prerequisites
 
 ### CLI (cross-platform)
 
-- Go 1.25+
+- Go 1.26.5+ (the minimum version in `go.mod`)
+- macOS and Linux: CGO enabled and a C compiler for the transitive
+  `onepassword-sdk-go` dependency used by ipatool's keyring package.
 
-That's it. The mint bundle lives under `internal/credmint/bundle/` - data blobs
+The mint bundle lives under `internal/credmint/bundle/` - data blobs
 and the four signed `*.ios` programs are committed and embedded via `go:embed`,
 so a plain build is fully mint-capable. (If the `*.ios` files are ever stripped
 to the placeholder marker, the CLI still decrypts but `credmint.Mint` returns
@@ -31,8 +39,11 @@ vendored port of [ipatool](https://github.com/majd/ipatool); it emulates Apple's
 AppleMediaServices framework to attest download requests. No build step is
 needed, but the **first** App Store action at runtime downloads and caches the
 Apple frameworks it emulates (~tens of MB, range-extracted from a pinned macOS
-image) under `~/.cache/ipadecrypt/`. The build stays pure Go (`CGO_ENABLED=0`
-cross-compiles for all release targets).
+image) under `~/.cache/ipadecrypt/`.
+
+Windows supports `CGO_ENABLED=0`. The pinned `onepassword-sdk-go` dependency
+rejects builds without CGO on macOS and Linux, including the corresponding
+targets in `.goreleaser.yaml`, which sets `CGO_ENABLED=0`.
 
 ## Build the CLI
 
@@ -50,8 +61,8 @@ go build -trimpath -ldflags="-s -w" -o ipadecrypt ./cmd/ipadecrypt
 
 Only needed when the device programs change. They build on **Linux or macOS via
 Docker** (no Xcode) in a pinned toolchain image - `clang` targeting
-`arm64-apple-ios`, an iPhoneOS SDK, and `ldid` for ad-hoc signing - the same
-approach the old on-device helper used. Sources come from the upstream
+`arm64-apple-ios`, an iPhoneOS SDK, and `ldid` for ad-hoc signing.
+Sources come from the upstream
 [fairplay-decrypt](https://github.com/EthanArbuckle/fairplay-decrypt)
 `credential-retrieval/` tree, which is not vendored here.
 

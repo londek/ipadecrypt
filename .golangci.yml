@@ -6,8 +6,8 @@ linters:
     - errcheck
   exclusions:
     # internal/apphttp, internal/store, internal/sap and internal/storeauth are
-    # a vendored copy of ipatool's App Store engine (see README "Prior art");
-    # they are maintained upstream, not linted to this project's rules.
+    # based on ipatool's App Store engine (see README "Prior art") and use
+    # its formatting conventions rather than this project's lint rules.
     paths:
       - internal/apphttp/
       - internal/store/

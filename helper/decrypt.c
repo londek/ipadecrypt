@@ -347,7 +347,7 @@ static int zip_add_file(int out, const char *full, const char *rel,
                         struct zip_entry **tail) {
     int fd = open(full, O_RDONLY);
     if (fd < 0) {
-        // Unreadable source file: warn and skip, matching the old `zip`.
+        // Unreadable source file: warn and skip.
         // Nothing has been written to `out` yet, so the archive stays
         // consistent. (>0 = skip, <0 = fatal output error.)
         wrn("skipping unreadable %s: %s", rel, strerror(errno));

@@ -706,9 +706,6 @@ int inject_missing_frameworks(task_t task, mach_port_t exc,
     // order). External deps - system /usr/lib/swift, /System, or toolchain
     // dylibs not shipped in the bundle - must never block: dlopen resolves
     // them from the shared cache / filesystem, or fails cleanly on its own.
-    // The old gate blocked on any unloaded dep, so a single unbundled dep
-    // (e.g. /usr/lib/swift/libswift_Builtin_float.dylib) wrongly skipped
-    // every framework transitively needing it.
     keyset_t bundle_keys = {0};
     for (int i = 0; i < fws.count; i++) {
         if (fws.items[i].self_key) keyset_add(&bundle_keys, fws.items[i].self_key);

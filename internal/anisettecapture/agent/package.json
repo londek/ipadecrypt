@@ -1,0 +1,15 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test *.test.mjs"
+  },
+  "devDependencies": {
+    "frida-compile": "19.1.0",
+    "frida-objc-bridge": "8.0.6"
+  },
+  "overrides": {
+    "frida": "17.26.2"
+  }
+}

@@ -26,13 +26,21 @@ const (
 	defaultUSBPort = 2222
 )
 
-var ErrSudoPasswordRejected = errors.New("sudo password rejected")
+var (
+	ErrSudoPasswordRejected = errors.New("sudo password rejected")
+	ErrAuthentication       = errors.New("ssh authentication rejected")
+)
 
 type Client struct {
 	cfg    config.Device
 	ssh    *ssh.Client
 	sftp   *sftp.Client
 	tunnel *exec.Cmd
+}
+
+// DialContext forwards a TCP connection through the authenticated SSH session.
+func (c *Client) DialContext(ctx context.Context, address string) (net.Conn, error) {
+	return c.ssh.DialContext(ctx, "tcp", address)
 }
 
 // Connect opens an SSH+SFTP session to the device. When dev.USB is set the
@@ -87,7 +95,7 @@ func Connect(ctx context.Context, dev config.Device) (*Client, error) {
 		conn.Close()
 		c.closeTunnel()
 
-		return nil, fmt.Errorf("ssh handshake: %w", err)
+		return nil, fmt.Errorf("ssh handshake: %w", classifyAuthenticationError(err))
 	}
 
 	c.ssh = ssh.NewClient(sshConn, chans, reqs)
@@ -191,7 +199,29 @@ func sshAuthMethods(a config.DeviceAuth) ([]ssh.AuthMethod, error) {
 		return []ssh.AuthMethod{ssh.PublicKeys(signer)}, nil
 	}
 
-	return []ssh.AuthMethod{ssh.Password(a.Password)}, nil
+	return []ssh.AuthMethod{
+		ssh.Password(a.Password),
+		ssh.KeyboardInteractive(passwordAnswers(a.Password)),
+	}, nil
+}
+
+func passwordAnswers(password string) ssh.KeyboardInteractiveChallenge {
+	return func(name, instruction string, questions []string, echos []bool) (answers []string, err error) {
+		answers = make([]string, len(questions))
+		for index := range answers {
+			answers[index] = password
+		}
+
+		return answers, nil
+	}
+}
+
+func classifyAuthenticationError(err error) error {
+	if err != nil && strings.Contains(err.Error(), "unable to authenticate") {
+		return fmt.Errorf("%w: %v", ErrAuthentication, err)
+	}
+
+	return err
 }
 
 func expandUser(path string) (string, error) {

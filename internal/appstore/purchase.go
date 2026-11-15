@@ -15,10 +15,7 @@ type purchaseResult struct {
 	CustomerMessage string `plist:"customerMessage,omitempty"`
 	JingleDocType   string `plist:"jingleDocType,omitempty"`
 	Status          int    `plist:"status,omitempty"`
-
-	// Dialog is the server message Apple shows instead of completing the
-	// purchase (e.g. the app is unavailable in the account's region).
-	Dialog struct {
+	Dialog          struct {
 		Message     string `plist:"message,omitempty"`
 		Explanation string `plist:"explanation,omitempty"`
 	} `plist:"dialog,omitempty"`
@@ -47,7 +44,7 @@ func (c *Client) Purchase(acc *Account, app App) error {
 	// if app.Price > 0 {
 	// return ErrPaidAppNotOwned
 	// }
-	g, err := guid()
+	g, err := c.guid()
 	if err != nil {
 		return err
 	}

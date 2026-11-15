@@ -165,6 +165,26 @@ func (s *shims) addAliases(names []string, handler shimHandler) error {
 	return nil
 }
 
+// replaceFunction keeps the import's guest address while changing its handler.
+func (s *shims) replaceFunction(name string, handler shimHandler) error {
+	address, err := s.resolve(name)
+	if err != nil {
+		return err
+	}
+	s.entries[address] = shimEntry{name: name, handler: handler}
+	return nil
+}
+
+// wrapFunction lets a scoped adapter delegate unsupported calls to the base shim.
+func (s *shims) wrapFunction(name string, wrap func(shimHandler) shimHandler) error {
+	address, err := s.resolve(name)
+	if err != nil {
+		return err
+	}
+	s.entries[address] = shimEntry{name: name, handler: wrap(s.entries[address].handler)}
+	return nil
+}
+
 func (s *shims) addFunction(name string, handler shimHandler) (uint64, error) {
 	if address, exists := s.symbols[name]; exists {
 		return address, nil

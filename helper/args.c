@@ -36,9 +36,7 @@ static int eq(const char *a, const char *b) { return strcmp(a, b) == 0; }
 // Returns 1 if `arg` was consumed as a global flag.
 static int parse_global(const char *arg, global_flags_t *g) {
     if (eq(arg, "-v") || eq(arg, "--verbose")) { g->verbose = 1; return 1; }
-    // Backwards-compat: -q used to silence stderr in the old dual-output
-    // design. The new helper has one channel (events on stdout); -q is a
-    // no-op so existing wrappers that still pass it don't error out.
+    // Events use stdout. Accept -q as a no-op for wrapper compatibility.
     if (eq(arg, "-q") || eq(arg, "--quiet")) { return 1; }
     return 0;
 }

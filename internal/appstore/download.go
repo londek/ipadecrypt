@@ -132,7 +132,7 @@ func (c *Client) PrepareDownload(acc *Account, app App, externalVersionID string
 // GetVersionMetadata - the request shape is identical, externalVersionID
 // decides what comes back.
 func (c *Client) volumeDownload(acc *Account, app App, externalVersionID string) (downloadItem, error) {
-	g, err := guid()
+	g, err := c.guid()
 	if err != nil {
 		return downloadItem{}, err
 	}

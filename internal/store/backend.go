@@ -11,10 +11,12 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/londek/ipadecrypt/internal/anisette"
 	apphttp "github.com/londek/ipadecrypt/internal/apphttp"
 	"github.com/londek/ipadecrypt/internal/sap/assets"
 	"github.com/londek/ipadecrypt/internal/store/emulator"
@@ -24,6 +26,7 @@ import (
 type Backend struct {
 	jar           http.CookieJar
 	macAddress    func() (string, error)
+	anisette      anisette.Provider
 	mu            sync.Mutex
 	image         []byte
 	bag           map[string]any
@@ -36,14 +39,14 @@ type executor struct {
 	operation string
 }
 
-func New(jar http.CookieJar, macAddress func() (string, error)) *Backend {
+func New(jar http.CookieJar, macAddress func() (string, error), provider anisette.Provider) *Backend {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.ResponseHeaderTimeout = 30 * time.Second
 	transport.IdleConnTimeout = 90 * time.Second
 	authTransport := transport.Clone()
 	authTransport.DisableKeepAlives = true
 
-	return &Backend{jar: jar, macAddress: macAddress, transport: transport, authTransport: authTransport}
+	return &Backend{jar: jar, macAddress: macAddress, anisette: provider, transport: transport, authTransport: authTransport}
 }
 
 // Client shares session cookies and bag data while isolating each guest VM.
@@ -127,7 +130,7 @@ func (e *executor) Do(request *http.Request) (*http.Response, error) {
 }
 
 func (b *Backend) hardware(parameters map[string]any) ([]byte, error) {
-	if value, ok := parameters["guid"].(string); ok {
+	if value, ok := parameters["guid"].(string); ok && len(value) == 12 {
 		data, err := hex.DecodeString(value)
 		if err != nil || len(data) != 6 {
 			return nil, errors.New("invalid Store hardware identity")
@@ -339,9 +342,28 @@ func (b *Backend) requestTransport(input emulator.Request) func(*http.Request) (
 			}
 		}
 
+		if b.anisette != nil && appleHost(request.URL.Hostname()) {
+			headers, err := b.anisette.Headers(time.Now())
+			if err != nil {
+				return nil, fmt.Errorf("anisette: %w", err)
+			}
+
+			for key, value := range headers {
+				if request.Header.Get(key) == "" {
+					request.Header.Set(key, value)
+				}
+			}
+		}
+
 		response, err := client.Do(request)
 		if err == nil && b.jar != nil {
 			b.jar.SetCookies(request.URL, response.Cookies())
+		}
+
+		// Log every wire hop of authenticate, including redirects the emulated
+		// framework follows itself; the caller only sees the final response.
+		if err == nil && input.Operation == "authenticate" && os.Getenv("IPADECRYPT_DEBUG") != "" {
+			fmt.Fprintf(os.Stderr, "[ipadecrypt debug] wire %s %s -> %s\n", request.Method, request.URL.Scheme+"://"+request.URL.Host+request.URL.EscapedPath(), apphttp.DescribeResponse(response))
 		}
 
 		if err != nil {
@@ -350,4 +372,24 @@ func (b *Backend) requestTransport(input emulator.Request) func(*http.Request) (
 
 		return response, nil
 	}
+}
+
+func appleHost(host string) bool {
+	host = strings.ToLower(host)
+	if host == "buy.itunes.apple.com" || host == "gsa.apple.com" {
+		return true
+	}
+
+	pod, ok := strings.CutSuffix(host, "-buy.itunes.apple.com")
+	if !ok || len(pod) < 2 || pod[0] != 'p' {
+		return false
+	}
+
+	for _, r := range pod[1:] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+
+	return true
 }

@@ -12,17 +12,24 @@ import (
 	"github.com/londek/ipadecrypt/internal/config"
 	"github.com/londek/ipadecrypt/internal/credmint"
 	"github.com/londek/ipadecrypt/internal/device"
+	"github.com/londek/ipadecrypt/internal/iphonesetup"
 	"github.com/londek/ipadecrypt/internal/tui"
 	"github.com/londek/ipadecrypt/internal/updater"
 	"github.com/spf13/cobra"
 )
 
-func bootstrapHandler(cmd *cobra.Command, args []string) {
+func bootstrapDeviceHandler(cmd *cobra.Command, args []string, flow string) error {
 	cfg, paths, err := loadConfigOrDefault(rootDirOverride)
 	if err != nil {
-		tui.Err("%v", err)
-		return
+		return err
 	}
+
+	previous, err := savedFlow(cfg)
+	if err != nil {
+		return err
+	}
+
+	cfg.Flow = previous
 
 	upd := updater.Start(context.Background(), resolveVersion(), cfg)
 	defer upd.Wait()
@@ -30,16 +37,19 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 	if bootstrapReset {
 		cfg.Apple = config.Apple{}
 		cfg.Device = config.Device{Port: 22}
+		cfg.Anisette = config.Anisette{}
 
 		if err := cfg.Save(); err != nil {
-			tui.Err("reset config: %v", err)
-			return
+			return fmt.Errorf("reset config: %w", err)
 		}
 
-		if err := os.Remove(filepath.Join(paths.Root, appstore.AnisetteFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
-			tui.Err("reset Apple authentication state: %v", err)
-			return
+		if err := resetFrameworkAuthentication(paths.Root); err != nil {
+			return err
 		}
+	}
+
+	if err := applyDeviceFlow(cfg, flow); err != nil {
+		return err
 	}
 
 	// ---- Step 1: App Store sign-in -----------------------------------
@@ -48,10 +58,25 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 		tui.Step(1, 3, "Sign in to the App Store (skipped)")
 		tui.Info("skipped - App Store downloads and credential minting are disabled.\nYou can still decrypt a local .ipa if a credential is already cached.")
 
+		cfg.Flow = flow
+		if err := cfg.Save(); err != nil {
+			return err
+		}
+
 		tui.Spacer()
 		tui.OK("bootstrap complete")
 
-		return
+		return nil
+	}
+
+	if flow == flowSnapshot {
+		if err := (iphonesetup.Setup{PromptDevice: promptMintDevice}).ConfigureSnapshot(cfg, paths); err != nil {
+			return fmt.Errorf("configure offline anisette: %w", err)
+		}
+	}
+
+	if err := cfg.Save(); err != nil {
+		return fmt.Errorf("save config: %w", err)
 	}
 
 	tui.Step(1, 3, "Sign in to the App Store")
@@ -59,12 +84,11 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 
 	account, err := bootstrapSignIn(cfg, paths)
 	if err != nil {
-		tui.Err("%v", err)
-		return
+		return err
 	}
 
 	if account == nil {
-		return
+		return errors.New("sign-in did not return an account")
 	}
 
 	// ---- Step 2: one-time credential mint ----------------------------
@@ -73,8 +97,7 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 
 	dsid := cfg.Apple.DirectoryServicesIdentifier
 	if dsid == "" {
-		tui.Err("sign-in did not return an account identifier; cannot mint")
-		return
+		return errors.New("sign-in did not return an account identifier; cannot mint")
 	}
 
 	if credentialCached(paths, dsid, false) && !bootstrapRemint {
@@ -87,13 +110,12 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 		tui.Bullet("at least one App Store app bought with this Apple ID, installed")
 		tui.Bullet("optionally an Apple Arcade app from this Apple ID, to also decrypt Arcade apps")
 
-		if err := promptMintDevice(cfg); err != nil {
-			return
+		if err := promptMintDevice(cfg, false); err != nil {
+			return err
 		}
 
 		if err := cfg.Save(); err != nil {
-			tui.Err("save config: %v", err)
-			return
+			return fmt.Errorf("save config: %w", err)
 		}
 
 		live := tui.NewLive()
@@ -105,17 +127,17 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 				live.Fail("this build cannot mint credentials")
 				tui.Info("the device binaries aren't compiled into this build; install an official release")
 
-				return
+				return err
 			}
 
-			live.Fail("mint failed: %v", err)
+			live.Fail("mint failed")
 
-			return
+			return err
 		}
 
 		if err := saveCredential(paths, dsid, false, credential); err != nil {
-			live.Fail("cache credential: %v", err)
-			return
+			live.Fail("cache credential failed")
+			return err
 		}
 
 		live.OK("credential minted and cached")
@@ -128,7 +150,15 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 	verifyDeviceDecryptReady(cfg)
 
 	tui.Spacer()
+
+	cfg.Flow = flow
+	if err := cfg.Save(); err != nil {
+		return fmt.Errorf("save selected flow: %w", err)
+	}
+
 	tui.OK("bootstrap complete - run `ipadecrypt decrypt <bundle-id|app-store-id|app-store-url|path-to-local-ipa>`")
+
+	return nil
 }
 
 // mintArcadeCredential mints the account's Apple Arcade credential when an
@@ -276,9 +306,19 @@ func bootstrapSignIn(cfg *config.Config, paths *config.Paths) (*appstore.Account
 		password = s
 	}
 
-	as, err := appstore.New(filepath.Join(paths.Root, "cookies"))
+	as, err := iphonesetup.NewClient(cfg, paths)
 	if err != nil {
 		return nil, fmt.Errorf("appstore client: %w", err)
+	}
+
+	signing, err := (iphonesetup.Setup{PromptDevice: promptMintDevice}).PrepareSigning(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("prepare native signing: %w", err)
+	}
+	defer signing.Close()
+
+	if err := signing.Configure(as); err != nil {
+		return nil, err
 	}
 
 	tui.Info("The first sign-in runs a one-time machine-signing step and can take a few minutes.")
@@ -292,7 +332,7 @@ func bootstrapSignIn(cfg *config.Config, paths *config.Paths) (*appstore.Account
 		live := tui.NewLive()
 		live.Spin("authenticating")
 
-		account, err = as.Login(email, password, authCode)
+		account, err = as.SignIn(email, password, authCode)
 		switch {
 		case errors.Is(err, appstore.ErrAuthCodeRequired):
 			live.Stop()
@@ -305,7 +345,7 @@ func bootstrapSignIn(cfg *config.Config, paths *config.Paths) (*appstore.Account
 			authCode = strings.TrimSpace(code)
 
 		case err != nil:
-			live.Fail("login failed: %v", err)
+			live.Fail("sign-in failed")
 			return nil, err
 
 		default:
@@ -337,9 +377,10 @@ func bootstrapSignIn(cfg *config.Config, paths *config.Paths) (*appstore.Account
 	return account, nil
 }
 
-// promptMintDevice fills in cfg.Device for the one-time credential mint.
-// Returns a non-nil error only to signal a user abort (callers just return).
-func promptMintDevice(cfg *config.Config) error {
+// promptMintDevice fills in cfg.Device for operations that need the jailbroken
+// device. confirmUser also prompts when a user is already configured. Returns
+// a non-nil error only to signal a user abort.
+func promptMintDevice(cfg *config.Config, confirmUser bool) error {
 	if cfg.Device.Host == "" && !cfg.Device.USB {
 		idx, err := tui.Select("how is the device connected?", []string{
 			"Network (device IP over Wi-Fi)",
@@ -374,8 +415,13 @@ func promptMintDevice(cfg *config.Config) error {
 		cfg.Device.Host = strings.TrimSpace(s)
 	}
 
-	if cfg.Device.User == "" {
-		u, err := tui.PromptDefault("device SSH user (root, or one that can sudo)", "mobile")
+	if cfg.Device.User == "" || confirmUser {
+		defaultUser := cfg.Device.User
+		if defaultUser == "" {
+			defaultUser = "mobile"
+		}
+
+		u, err := tui.PromptDefault("device SSH user (root, or one that can sudo)", defaultUser)
 		if err != nil {
 			return err
 		}
@@ -441,6 +487,32 @@ func promptMintDevice(cfg *config.Config) error {
 
 	if cfg.Device.Port == 0 {
 		cfg.Device.Port = 22
+	}
+
+	return nil
+}
+
+// Reset supported authentication files while preserving snapshot directories.
+func resetFrameworkAuthentication(root string) error {
+	for _, name := range []string{appstore.AnisetteFile, "anisette"} {
+		path := filepath.Join(root, name)
+
+		info, err := os.Stat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+
+		if err != nil {
+			return fmt.Errorf("inspect Apple authentication state: %w", err)
+		}
+
+		if info.IsDir() && name == "anisette" {
+			continue
+		}
+
+		if err := os.Remove(path); err != nil {
+			return fmt.Errorf("reset Apple authentication state: %w", err)
+		}
 	}
 
 	return nil

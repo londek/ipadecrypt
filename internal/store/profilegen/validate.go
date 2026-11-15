@@ -204,9 +204,8 @@ func (r *Result) Validate(cache *assets.StoreCache, reference *profileformat.Pro
 			}
 
 			nativeLayout := old.read(old.u64(a-8)+64, 24)
-			// The old exporter omitted initialized in-image value-witness tables.
-			// Compare every available native layout; incomplete uncaptured tables
-			// carry no reference evidence.
+			// Compare available native layouts; incomplete uncaptured value-witness
+			// tables cannot serve as a reference.
 			if binary.LittleEndian.Uint32(nativeLayout[16:])&0x400000 == 0 && !bytes.Equal(nativeLayout, current.read(current.u64(b-8)+64, 24)) {
 				return fmt.Errorf("swift value layout mismatch: %s native=%x generated=%x", key, nativeLayout, current.read(current.u64(b-8)+64, 24))
 			}

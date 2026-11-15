@@ -11,14 +11,19 @@ import (
 	"sync"
 
 	cookiejar "github.com/juju/persistent-cookiejar"
+	"github.com/londek/ipadecrypt/internal/anisette"
 	"github.com/londek/ipadecrypt/internal/store"
 	"github.com/londek/ipadecrypt/internal/storeauth"
 )
 
 // AnisetteFile is the persisted Anisette state, kept next to the cookies file.
-const AnisetteFile = "anisette"
+// The former name, "anisette", is also used by the iPhone snapshot directory.
+const AnisetteFile = "store-anisette"
 
 type Client struct {
+	anisette            anisette.Provider
+	deviceSigner        *deviceActionSigner
+	deviceGUID          string
 	jar                 *cookiejar.Jar
 	http                *http.Client
 	backend             *store.Backend
@@ -33,7 +38,7 @@ type Client struct {
 	anisetteState []byte
 }
 
-func New(cookiesFile string) (*Client, error) {
+func New(cookiesFile string, provider anisette.Provider) (*Client, error) {
 	jar, err := cookiejar.New(&cookiejar.Options{Filename: cookiesFile})
 	if err != nil {
 		return nil, err
@@ -54,9 +59,10 @@ func New(cookiesFile string) (*Client, error) {
 	// Store API requests are built and attested by the emulated AppleMediaServices
 	// framework in the backend; the SAP signer (used for authenticate) sends its
 	// setup/cert exchange directly through the backend's "sap" executor.
-	backend := store.New(jar, macAddress)
+	backend := store.New(jar, macAddress, provider)
 
 	return &Client{
+		anisette:            provider,
 		jar:                 jar,
 		http:                hc,
 		backend:             backend,
@@ -70,7 +76,13 @@ func New(cookiesFile string) (*Client, error) {
 // means the machine has not been provisioned yet. Callers hold authMu.
 func (c *Client) loadAnisette() {
 	if len(c.anisetteState) == 0 {
-		c.anisetteState, _ = os.ReadFile(c.anisettePath)
+		var err error
+
+		c.anisetteState, err = os.ReadFile(c.anisettePath)
+		if os.IsNotExist(err) {
+			// Read existing main-branch state without moving or touching snapshots.
+			c.anisetteState, _ = os.ReadFile(filepath.Join(filepath.Dir(c.anisettePath), "anisette"))
+		}
 	}
 }
 
@@ -92,8 +104,12 @@ func (c *Client) saveAnisette(state []byte) error {
 	return nil
 }
 
-// guid returns the Configurator-shaped GUID: uppercase MAC address, no colons.
-func guid() (string, error) {
+// guid uses the signing device identity when configured, otherwise the host MAC.
+func (c *Client) guid() (string, error) {
+	if c.deviceGUID != "" {
+		return c.deviceGUID, nil
+	}
+
 	mac, err := macAddress()
 	if err != nil {
 		return "", err
