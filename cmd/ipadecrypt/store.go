@@ -26,7 +26,7 @@ func reauth(cfg *config.Config, as *appstore.Client) error {
 		return errors.New("re-auth: no stored account; run `ipadecrypt bootstrap`")
 	}
 
-	acc, err := as.Login(cfg.Apple.Email, cfg.Apple.Password, "")
+	acc, err := as.Login(cfg.Apple.Email, cfg.Apple.Password, "", nil)
 	if err != nil {
 		return fmt.Errorf("re-auth: %w", err)
 	}

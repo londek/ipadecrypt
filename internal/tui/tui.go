@@ -317,12 +317,13 @@ func writePrompt(label string) {
 // Live is a single in-place progress line. Exactly one Live should be visible
 // at a time; call OK, Fail, or Stop to close it.
 type Live struct {
-	mu     sync.Mutex
-	stop   chan struct{}
-	done   chan struct{}
-	state  liveState
-	tty    bool
-	active bool
+	mu          sync.Mutex
+	stop        chan struct{}
+	done        chan struct{}
+	state       liveState
+	tty         bool
+	active      bool
+	showElapsed bool
 }
 
 type liveState struct {
@@ -330,6 +331,7 @@ type liveState struct {
 	cur, max int64
 	hasBar   bool
 	detail   string
+	since    time.Time
 }
 
 func NewLive() *Live {
@@ -350,6 +352,15 @@ func NewLive() *Live {
 
 func (l *Live) Spin(format string, args ...any) {
 	l.setMessage(fmt.Sprintf(format, args...), true)
+}
+
+// ShowElapsed appends how long the current message has been shown, for steps
+// that can run for minutes without a measurable progress.
+func (l *Live) ShowElapsed() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.showElapsed = true
 }
 
 // Message updates the current live-line text without changing whether the
@@ -379,6 +390,10 @@ func (l *Live) setMessage(msg string, clearBar bool) {
 	prev := l.state
 
 	l.state.msg = msg
+	if msg != prev.msg {
+		l.state.since = time.Now()
+	}
+
 	if clearBar {
 		l.state.cur = 0
 		l.state.max = 0
@@ -484,6 +499,11 @@ func (l *Live) render(tick int) {
 
 	if st.msg != "" {
 		line += " " + st.msg
+	}
+
+	if l.showElapsed && !st.since.IsZero() {
+		elapsed := time.Since(st.since)
+		line += " " + paint(ansiDim, fmt.Sprintf("%d:%02d", int(elapsed.Minutes()), int(elapsed.Seconds())%60))
 	}
 
 	if st.hasBar {

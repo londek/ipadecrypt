@@ -16,6 +16,8 @@ import (
 	"unicode"
 
 	apphttp "github.com/londek/ipadecrypt/internal/apphttp"
+	"github.com/londek/ipadecrypt/internal/sap/assets"
+	"github.com/londek/ipadecrypt/internal/sap/unicorn"
 	"github.com/londek/ipadecrypt/internal/storeauth"
 )
 
@@ -84,13 +86,28 @@ var storeCookieDSIDPattern = regexp.MustCompile(`(?:^|[ ,])mz_at(?:0|_ssl)-([0-9
 // identity) headers. Login signs in with a Store AMD proof from the persisted
 // Anisette state when it yields one; otherwise it provisions this machine and
 // answers Apple's reset ("RP") and then Store provisioning ("SP") requests.
-func (c *Client) Login(email, password, authCode string) (*Account, error) {
+//
+// If onStage is non-nil it is called with a short description each time Login
+// moves to another step, so callers can show what a slow sign-in is doing.
+func (c *Client) Login(email, password, authCode string, onStage func(stage string)) (*Account, error) {
+	stage := func(s string) {
+		if onStage != nil {
+			onStage(s)
+		}
+	}
+
 	c.authMu.Lock()
 	defer c.authMu.Unlock()
 
 	c.loadAnisette()
 
 	ctx := context.Background()
+
+	stage("preparing the emulator (slow on first run)")
+
+	if err := prepareEmulator(ctx); err != nil {
+		return nil, err
+	}
 
 	mac, err := macAddress()
 	if err != nil {
@@ -119,6 +136,8 @@ func (c *Client) Login(email, password, authCode string) (*Account, error) {
 			// A machine action here means Apple rejected the persisted state
 			// (e.g. it predates Store provisioning, or the hardware identity
 			// changed), so this machine is provisioned again.
+			stage("signing in")
+
 			acc, err := c.legacyLogin(email, password, authCode, headerFromMap(proof))
 			if !errors.As(err, &action) {
 				return acc, err
@@ -126,12 +145,16 @@ func (c *Client) Login(email, password, authCode string) (*Account, error) {
 		}
 	}
 
+	stage("registering this Mac with Apple")
+
 	general, err := c.provisionAnisette(ctx)
 	if err != nil {
 		return nil, err
 	}
 
 	headers := general.Clone()
+
+	stage("signing in")
 
 	acc, err := c.legacyLogin(email, password, authCode, headers)
 	if !errors.As(err, &action) || action.action != "RP" {
@@ -146,6 +169,8 @@ func (c *Client) Login(email, password, authCode string) (*Account, error) {
 	if !errors.As(err, &action) || action.action != "SP" {
 		return acc, err
 	}
+
+	stage("completing App Store registration")
 
 	kbsync, err := c.generateKBSync(ctx, hardwareID, ^uint64(1))
 	if err != nil {
@@ -170,7 +195,25 @@ func (c *Client) Login(email, password, authCode string) (*Account, error) {
 		return nil, err
 	}
 
+	stage("signing in")
+
 	return c.legacyLogin(email, password, authCode, headerFromMap(proof))
+}
+
+// prepareEmulator loads the Apple frameworks and the Unicorn runtime before
+// they are first needed. Both are downloaded and cached on the first run, so
+// doing it up front lets Login report that slow step on its own.
+func prepareEmulator(ctx context.Context) error {
+	if _, err := assets.Load(ctx); err != nil {
+		return fmt.Errorf("prepare emulator: %w", err)
+	}
+
+	engine, err := unicorn.New(ctx)
+	if err != nil {
+		return fmt.Errorf("prepare emulator: %w", err)
+	}
+
+	return engine.Close()
 }
 
 // provisionAnisette runs general machine provisioning and returns its
