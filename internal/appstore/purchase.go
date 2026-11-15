@@ -52,7 +52,12 @@ func (c *Client) Purchase(acc *Account, app App) error {
 		return err
 	}
 
-	return c.purchaseWithParams(acc, app, g, pricingAppStore)
+	err = c.purchaseWithParams(acc, app, g, pricingAppStore)
+	if errors.Is(err, ErrTemporarilyUnavailable) {
+		return c.purchaseWithParams(acc, app, g, pricingAppleArcade)
+	}
+
+	return err
 }
 
 func (c *Client) purchaseWithParams(acc *Account, app App, g, params string) error {
