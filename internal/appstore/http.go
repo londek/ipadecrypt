@@ -18,6 +18,8 @@ type responseFormat int
 const (
 	formatXML responseFormat = iota
 	formatJSON
+	// formatRaw stores the undecoded body into out, which must be a *[]byte.
+	formatRaw
 )
 
 var (
@@ -83,6 +85,8 @@ func (c *Client) sendRequest(op string, req apphttp.Request, format responseForm
 	}
 
 	switch format {
+	case formatRaw:
+		*out.(*[]byte) = data
 	case formatJSON:
 		if err := json.Unmarshal(data, out); err != nil {
 			return nil, fmt.Errorf("decode json: %w", err)
@@ -103,8 +107,11 @@ func (c *Client) sendRequest(op string, req apphttp.Request, format responseForm
 }
 
 func apphttpFormat(f responseFormat) apphttp.ResponseFormat {
-	if f == formatJSON {
+	switch f {
+	case formatJSON:
 		return apphttp.ResponseFormatJSON
+	case formatRaw:
+		return apphttp.ResponseFormatRaw
 	}
 
 	return apphttp.ResponseFormatXML

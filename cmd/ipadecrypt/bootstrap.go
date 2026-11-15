@@ -319,7 +319,7 @@ func bootstrapSignIn(cfg *config.Config, paths *config.Paths) (*appstore.Account
 
 	cfg.Apple.SetAccount(account)
 
-	appStoreCountry, err := appstore.CountryCodeFromStoreFront(account.StoreFront)
+	appStoreCountry, err := as.CountryCodeFromStoreFront(account.StoreFront)
 	if err != nil {
 		return nil, fmt.Errorf("resolve appstore country code: %w", err)
 	}

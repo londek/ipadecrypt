@@ -86,7 +86,7 @@ func versionsHandler(cmd *cobra.Command, args []string) {
 		live.Spin("resolving bundleId %s", target.bundleId)
 	}
 
-	acc, err := accountWithStorefront(cfg, versionsStorefront)
+	acc, err := accountWithStorefront(as, cfg, versionsStorefront)
 	if err != nil {
 		tui.Err("storefront: %v", err)
 		return

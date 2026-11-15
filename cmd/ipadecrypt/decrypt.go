@@ -234,13 +234,13 @@ func decryptHandler(cmd *cobra.Command, args []string) {
 			return
 		}
 
-		acc, err := accountWithStorefront(cfg, decryptStorefront)
+		acc, err := accountWithStorefront(as, cfg, decryptStorefront)
 		if err != nil {
 			tui.Err("storefront: %v", err)
 			return
 		}
 
-		appStoreCountry, err := appstore.CountryCodeFromStoreFront(acc.StoreFront)
+		appStoreCountry, err := as.CountryCodeFromStoreFront(acc.StoreFront)
 		if err != nil {
 			tui.Err("resolve appstore country code: %v", err)
 			return

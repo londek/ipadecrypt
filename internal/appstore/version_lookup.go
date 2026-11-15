@@ -21,7 +21,7 @@ func (c *Client) lookupLatestExternalVersionID(acc *Account, app App) (string, e
 		return "", errors.New("version lookup: app ID is required")
 	}
 
-	countryCode, err := CountryCodeFromStoreFront(acc.StoreFront)
+	countryCode, err := c.CountryCodeFromStoreFront(acc.StoreFront)
 	if err != nil {
 		return "", fmt.Errorf("version lookup: resolve country code: %w", err)
 	}
