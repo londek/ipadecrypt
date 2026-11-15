@@ -6,10 +6,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"net/http"
 	"strconv"
 	"sync"
+	"time"
 
+	apphttp "github.com/londek/ipadecrypt/internal/apphttp"
 	"github.com/londek/ipadecrypt/internal/sap/assets"
 	"github.com/londek/ipadecrypt/internal/sap/machine"
 )
@@ -26,17 +27,12 @@ type kbsyncStore struct {
 }
 
 // generateKBSync returns the base64 FairPlay attestation blob the ent/download
-// endpoint requires, producing it with the StoreAgent guest (and caching it per
-// account/device for the process). Mirrors ipatool generateKBSync.
-func (c *Client) generateKBSync(ctx context.Context, hardwareID []byte, dsid uint64, g string) (string, error) {
-	c.kbsync.mu.Lock()
-	if c.kbsync.blob != "" && c.kbsync.dsid == dsid && c.kbsync.guid == g {
-		blob := c.kbsync.blob
-		c.kbsync.mu.Unlock()
-
-		return blob, nil
+// endpoint requires, producing it with the StoreAgent guest. Mirrors ipatool
+// generateKBSync.
+func (c *Client) generateKBSync(ctx context.Context, hardwareID []byte, dsid uint64) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("generate kbsync: %w", err)
 	}
-	c.kbsync.mu.Unlock()
 
 	bundle, err := assets.Load(ctx)
 	if err != nil {
@@ -48,95 +44,168 @@ func (c *Client) generateKBSync(ctx context.Context, hardwareID []byte, dsid uin
 		return "", fmt.Errorf("generate kbsync: %w", err)
 	}
 
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("generate kbsync: %w", err)
+	}
+
 	if len(data) == 0 {
 		return "", errors.New("generated kbsync is empty")
 	}
 
-	blob := base64.StdEncoding.EncodeToString(data)
+	return base64.StdEncoding.EncodeToString(data), nil
+}
 
+// storeKBSync caches only blobs that have served a valid ent/download response.
+func (c *Client) storeKBSync(dsid uint64, g, blob string) {
 	c.kbsync.mu.Lock()
-	c.kbsync.dsid, c.kbsync.guid, c.kbsync.blob = dsid, g, blob
-	c.kbsync.mu.Unlock()
+	defer c.kbsync.mu.Unlock()
 
-	return blob, nil
+	c.kbsync.dsid, c.kbsync.guid, c.kbsync.blob = dsid, g, blob
+}
+
+func (c *Client) cachedKBSync(dsid uint64, g string) string {
+	c.kbsync.mu.Lock()
+	defer c.kbsync.mu.Unlock()
+
+	if c.kbsync.dsid == dsid && c.kbsync.guid == g && c.kbsync.blob != "" {
+		return c.kbsync.blob
+	}
+
+	return ""
+}
+
+// invalidateKBSync drops the cache only if it still holds the rejected blob.
+func (c *Client) invalidateKBSync(dsid uint64, g, blob string) {
+	c.kbsync.mu.Lock()
+	defer c.kbsync.mu.Unlock()
+
+	if c.kbsync.dsid == dsid && c.kbsync.guid == g && c.kbsync.blob == blob {
+		c.kbsync.dsid, c.kbsync.guid, c.kbsync.blob = 0, "", ""
+	}
 }
 
 // entDownload attempts the attested ent/download path, which Apple's modern
 // AppleMediaServices framework fully supports (unlike the legacy
-// redownload/update endpoints). It returns handled=false to fall back to the
-// legacy volumeStore chain when the bag has no ent endpoint or attestation
-// cannot be produced. Mirrors ipatool sendEntDownload.
-func (c *Client) entDownload(acc *Account, app App, g, externalVersionID string) (item downloadItem, handled bool, err error) {
-	bag, err := c.fetchURLBag()
-	if err != nil || bag.EntDownloadEndpoint == "" {
-		return downloadItem{}, false, nil
-	}
-
-	entURL, err := downloadDispatchURL(bag.EntDownloadEndpoint, entDownloadPath)
+// redownload/update endpoints), pinning the current iOS version when none was
+// requested. Any error lets the caller fall back to the legacy volumeStore
+// chain.
+func (c *Client) entDownload(endpoint string, acc *Account, app App, g, externalVersionID string) (apphttp.Result[downloadResult], error) {
+	entURL, err := downloadDispatchURL(endpoint, entDownloadPath)
 	if err != nil {
-		return downloadItem{}, false, nil
-	}
-
-	hardwareID, err := hex.DecodeString(g)
-	if err != nil || len(hardwareID) != 6 {
-		return downloadItem{}, false, nil
-	}
-
-	dsid, err := strconv.ParseUint(acc.DirectoryServicesID, 10, 64)
-	if err != nil || dsid == 0 {
-		return downloadItem{}, false, nil
+		return apphttp.Result[downloadResult]{}, err
 	}
 
 	if externalVersionID == "" {
 		externalVersionID, err = c.lookupLatestExternalVersionID(acc, app)
 		if err != nil {
-			debugf("ent/download: resolve version: %v", err)
-			return downloadItem{}, false, nil
+			return apphttp.Result[downloadResult]{}, fmt.Errorf("ent/download: resolve version: %w", err)
 		}
 	}
 
-	blob, err := c.generateKBSync(context.Background(), hardwareID, dsid, g)
-	if err != nil {
-		debugf("ent/download: %v", err)
-		return downloadItem{}, false, nil
+	return c.sendEntDownload(entURL, acc, app, g, externalVersionID)
+}
+
+// sendEntDownload sends ent/download with a cached kbsync blob when one exists,
+// retrying once with a fresh blob if the cached one is rejected. An empty
+// externalVersionID lets Apple pick the entitled build.
+func (c *Client) sendEntDownload(endpoint string, acc *Account, app App, g, externalVersionID string) (apphttp.Result[downloadResult], error) {
+	hardwareID, err := hex.DecodeString(g)
+	if err != nil || len(hardwareID) != 6 {
+		return apphttp.Result[downloadResult]{}, errors.New("ent/download requires a six-byte device GUID")
 	}
 
+	dsid, err := strconv.ParseUint(acc.DirectoryServicesID, 10, 64)
+	if err != nil || dsid == 0 {
+		return apphttp.Result[downloadResult]{}, errors.New("ent/download requires a nonzero numeric account DSID")
+	}
+
+	// Asset loading and guest execution also honor this deadline.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	if cached := c.cachedKBSync(dsid, g); cached != "" {
+		res, err := c.sendEntDownloadRequest(ctx, endpoint, acc, app, g, externalVersionID, hardwareID, cached)
+		if err == nil {
+			return res, nil
+		}
+
+		if ctx.Err() != nil {
+			return res, fmt.Errorf("ent/download canceled: %w", ctx.Err())
+		}
+
+		debugf("ent/download with cached kbsync: %v", err)
+
+		c.invalidateKBSync(dsid, g, cached)
+	}
+
+	blob, err := c.generateKBSync(ctx, hardwareID, dsid)
+	if err != nil {
+		return apphttp.Result[downloadResult]{}, err
+	}
+
+	res, err := c.sendEntDownloadRequest(ctx, endpoint, acc, app, g, externalVersionID, hardwareID, blob)
+	if err == nil {
+		c.storeKBSync(dsid, g, blob)
+	}
+
+	return res, err
+}
+
+// sendEntDownloadRequest accepts only a validated success; failures, including
+// structured ones, are returned as errors.
+func (c *Client) sendEntDownloadRequest(ctx context.Context, endpoint string, acc *Account, app App, g, externalVersionID string, hardwareID []byte, blob string) (apphttp.Result[downloadResult], error) {
 	serial := append([]byte{0x54, 0xc8, 0xb0, 0xa9, 0x88}, hardwareID[2:]...)
+	request := downloadProductRequest(endpoint, "", acc, app, g, "")
+
+	requestContext, cancelRequest := context.WithTimeout(ctx, apphttp.DefaultAuthenticationTimeout)
+	defer cancelRequest()
+
+	request.Context = requestContext
+	request.Headers["Content-Type"] = "application/x-www-form-urlencoded; charset=utf-8"
+
+	proof, err := c.storeAMDProof(ctx, request.URL, hardwareID)
+	if err != nil {
+		return apphttp.Result[downloadResult]{}, err
+	}
+
+	for key, value := range proof {
+		request.Headers[key] = value
+	}
 
 	payload := map[string]any{
-		"creditDisplay":     "",
-		"guid":              g,
-		"kbsync":            blob,
-		"salableAdamId":     strconv.FormatInt(app.ID, 10),
-		"serialNumber":      base64.StdEncoding.EncodeToString(serial),
-		"externalVersionId": externalVersionID,
+		"creditDisplay": "",
+		"guid":          g,
+		"kbsync":        blob,
+		"salableAdamId": strconv.FormatInt(app.ID, 10),
+		"serialNumber":  base64.StdEncoding.EncodeToString(serial),
+	}
+	if externalVersionID != "" {
+		payload["externalVersionId"] = externalVersionID
 	}
 
-	headers := map[string]string{
-		"Content-Type":        "application/x-www-form-urlencoded; charset=utf-8",
-		"iCloud-DSID":         acc.DirectoryServicesID,
-		"X-Dsid":              acc.DirectoryServicesID,
-		"X-Apple-Store-Front": acc.StoreFront,
-		"X-Token":             acc.PasswordToken,
-	}
+	request.Payload = &apphttp.XMLPayload{Content: payload}
 
-	var out downloadResult
-
-	res, err := c.sendCommerce(fmt.Sprintf("%s?guid=%s", entURL, g), g, headers, payload, &out)
+	res, err := c.downloadClient().Send(request)
 	if err != nil {
-		return downloadItem{}, false, fmt.Errorf("ent/download request: %w", err)
+		return res, fmt.Errorf("ent/download request: %w", err)
 	}
+
+	res.Data = normalizeDownloadFailure(res.Data)
 
 	debugf("ent/download ver=%q: status=%d failureType=%q customerMessage=%q items=%d",
-		externalVersionID, res.StatusCode, out.FailureType, out.CustomerMessage, len(out.Items))
+		externalVersionID, res.StatusCode, res.Data.FailureType, res.Data.CustomerMessage, len(res.Data.Items))
 
-	if res.StatusCode == http.StatusForbidden {
-		return downloadItem{}, false, nil
+	if res.Data.FailureType != "" {
+		return res, fmt.Errorf("ent/download: %s", res.Data.FailureType)
 	}
 
-	if item, decided, ferr := classifyDownload(out); decided {
-		return item, true, ferr
+	if err := validateVersionedDownload(res, app, externalVersionID, "ent/download"); err != nil {
+		return res, err
 	}
 
-	return downloadItem{}, false, nil
+	if res.Data.Items[0].URL == "" {
+		return res, errors.New("ent/download response has no package URL")
+	}
+
+	return res, nil
 }

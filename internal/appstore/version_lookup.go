@@ -39,18 +39,29 @@ func (c *Client) lookupLatestExternalVersionID(acc *Account, app App) (string, e
 		return id, nil
 	}
 
+	// The catalog errors are kept so a 404 (errCatalogAppNotFound) still
+	// reaches the delisted-app recovery.
+	var catalogErr error
+
 	for _, platform := range []string{"iphone", "ipad"} {
-		if id, err := c.catalogExternalVersionID(app, countryCode, platform); err == nil {
+		id, err := c.catalogExternalVersionID(app, countryCode, platform)
+		if err == nil {
 			return id, nil
 		}
+
+		catalogErr = errors.Join(catalogErr, err)
 	}
 
 	if lastErr == nil {
 		lastErr = errors.New("no external version id found")
 	}
 
-	return "", fmt.Errorf("version lookup: app %d in storefront %s: %w", app.ID, countryCode, lastErr)
+	return "", fmt.Errorf("version lookup: app %d in storefront %s: %w; %w", app.ID, countryCode, lastErr, catalogErr)
 }
+
+// errCatalogAppNotFound is returned only when the public catalog answers 404,
+// which confirms the app is delisted; empty or malformed metadata is an error.
+var errCatalogAppNotFound = errors.New("app not found")
 
 type platformVersionLookupResult struct {
 	Results map[string]platformVersionLookupItem `json:"results,omitempty"`
@@ -109,7 +120,7 @@ func (c *Client) mdmExternalVersionID(app App, countryCode, catalog string) (str
 
 	var out platformVersionLookupResult
 
-	res, err := c.send("request", http.MethodGet, lookupURL, nil, nil, nil, formatJSON, &out)
+	res, err := c.send("request", http.MethodGet, lookupURL, nil, nil, formatJSON, &out)
 	if err != nil {
 		return "", fmt.Errorf("mdm lookup (%s): %w", catalog, err)
 	}
@@ -163,9 +174,13 @@ func (c *Client) catalogExternalVersionID(app App, countryCode, platform string)
 
 	var out catalogVersionLookupResult
 
-	res, err := c.send("request", http.MethodGet, lookupURL, nil, nil, nil, formatJSON, &out)
+	res, err := c.send("request", http.MethodGet, lookupURL, nil, nil, formatJSON, &out)
 	if err != nil {
 		return "", fmt.Errorf("catalog lookup (%s): %w", platform, err)
+	}
+
+	if res.StatusCode == http.StatusNotFound {
+		return "", fmt.Errorf("catalog lookup (%s): %w", platform, errCatalogAppNotFound)
 	}
 
 	if res.StatusCode != http.StatusOK {

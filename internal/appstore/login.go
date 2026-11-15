@@ -97,7 +97,7 @@ func (c *Client) Login(email, password, authCode string) (*Account, error) {
 		return nil, err
 	}
 
-	g, hardwareID, err := machineIdentity(mac)
+	_, hardwareID, err := machineIdentity(mac)
 	if err != nil {
 		return nil, err
 	}
@@ -147,7 +147,7 @@ func (c *Client) Login(email, password, authCode string) (*Account, error) {
 		return acc, err
 	}
 
-	kbsync, err := c.generateKBSync(ctx, hardwareID, ^uint64(1), g)
+	kbsync, err := c.generateKBSync(ctx, hardwareID, ^uint64(1))
 	if err != nil {
 		return nil, fmt.Errorf("generate Apple Store provisioning kbsync: %w", err)
 	}

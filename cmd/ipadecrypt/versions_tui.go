@@ -499,18 +499,7 @@ func (ui *versionsUI) fetchWorker(queue <-chan string, results chan<- fetchResul
 			logVersionsResponse(ui.logPath, "get_version_metadata", ui.app.BundleID, extVerID, meta.Raw)
 		}
 
-		// Range-fetch Info.plist from the IPA URL the metadata call
-		// just gave us. Failures here are non-fatal - the row still
-		// shows everything else and just leaves the minOS column blank.
-		var minOS string
-
-		if err == nil && meta.URL != "" {
-			if v, ferr := ui.as.FetchMinimumOSVersion(meta); ferr == nil {
-				minOS = v
-			}
-		}
-
-		results <- fetchResult{extVerID: extVerID, meta: meta, minOS: minOS, err: err}
+		results <- fetchResult{extVerID: extVerID, meta: meta, minOS: meta.MinimumOSVersion, err: err}
 	}
 }
 

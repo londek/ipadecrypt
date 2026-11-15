@@ -23,24 +23,7 @@ func (c *Client) LookupByBundleID(acc *Account, bundleID string) (App, error) {
 	q.Add("country", cc)
 	q.Add("bundleId", bundleID)
 
-	u := fmt.Sprintf("https://%s%s?%s", iTunesDomain, lookupPath, q.Encode())
-
-	var out lookupResult
-
-	res, err := c.send("request", http.MethodGet, u, nil, nil, nil, formatJSON, &out)
-	if err != nil {
-		return App{}, fmt.Errorf("lookup: %w", err)
-	}
-
-	if res.StatusCode != http.StatusOK {
-		return App{}, fmt.Errorf("lookup: status %d", res.StatusCode)
-	}
-
-	if len(out.Results) == 0 {
-		return App{}, fmt.Errorf("lookup: %s not found", bundleID)
-	}
-
-	return out.Results[0], nil
+	return c.lookup(fmt.Sprintf("https://%s%s?%s", iTunesDomain, lookupPath, q.Encode()), bundleID)
 }
 
 func (c *Client) LookupByAppID(acc *Account, appID string) (App, error) {
@@ -51,16 +34,16 @@ func (c *Client) LookupByAppID(acc *Account, appID string) (App, error) {
 
 	q := url.Values{}
 	q.Add("entity", "software,iPadSoftware")
-	q.Add("limit", "1")
-	q.Add("media", "software")
 	q.Add("country", cc)
 	q.Add("id", appID)
 
-	u := fmt.Sprintf("https://%s%s?%s", iTunesDomain, lookupPath, q.Encode())
+	return c.lookup(fmt.Sprintf("https://%s%s?%s", iTunesDomain, lookupPath, q.Encode()), appID)
+}
 
+func (c *Client) lookup(u, id string) (App, error) {
 	var out lookupResult
 
-	res, err := c.send("request", http.MethodGet, u, nil, nil, nil, formatJSON, &out)
+	res, err := c.send("request", http.MethodGet, u, nil, nil, formatJSON, &out)
 	if err != nil {
 		return App{}, fmt.Errorf("lookup: %w", err)
 	}
@@ -70,7 +53,7 @@ func (c *Client) LookupByAppID(acc *Account, appID string) (App, error) {
 	}
 
 	if len(out.Results) == 0 {
-		return App{}, fmt.Errorf("lookup: %s not found", appID)
+		return App{}, fmt.Errorf("lookup: %s: %w", id, ErrAppNotFound)
 	}
 
 	return out.Results[0], nil
