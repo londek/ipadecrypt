@@ -17,10 +17,10 @@ func debugf(format string, args ...any) {
 }
 
 // debugDumpURL reports whether raw response bodies for this URL may be dumped.
-// It allowlists the download and version-lookup endpoints and never matches the
+// It allowlists the version-lookup endpoints and never matches the
 // authenticate/login endpoints, whose bodies carry the account password.
 func debugDumpURL(u string) bool {
-	for _, s := range []string{"DownloadProduct", "/r/redownload", "/up/updateProduct", "MZStorePlatform", "/catalog/"} {
+	for _, s := range []string{"MZStorePlatform", "/catalog/"} {
 		if strings.Contains(u, s) {
 			return true
 		}

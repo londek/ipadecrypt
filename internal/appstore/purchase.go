@@ -44,15 +44,21 @@ func (r purchaseResult) failure() error {
 // Purchase acquires a license for the given app on the signed-in account.
 // Tries the App Store pricing family first, falls back to Arcade.
 func (c *Client) Purchase(acc *Account, app App) error {
-	// if app.Price > 0 {
-	// return ErrPaidAppNotOwned
-	// }
 	g, err := guid()
 	if err != nil {
 		return err
 	}
 
-	return c.purchaseWithParams(acc, app, g, pricingAppStore)
+	if app.Price > 0 {
+		return ErrPaidAppNotOwned
+	}
+
+	err = c.purchaseWithParams(acc, app, g, pricingAppStore)
+	if errors.Is(err, ErrTemporarilyUnavailable) {
+		return c.purchaseWithParams(acc, app, g, pricingAppleArcade)
+	}
+
+	return err
 }
 
 func (c *Client) purchaseWithParams(acc *Account, app App, g, params string) error {
@@ -86,12 +92,20 @@ func (c *Client) purchaseWithParams(acc *Account, app App, g, params string) err
 		"salableAdamId":             app.ID,
 	}
 
-	var out purchaseResult
+	client := apphttp.NewClient[purchaseResult](apphttp.Args{CookieJar: c.jar, Executor: c.backend.Client("purchase")})
 
-	res, err := c.send("purchase", http.MethodPost, url, headers, &apphttp.XMLPayload{Content: payload}, nil, formatXML, &out)
+	res, err := client.Send(apphttp.Request{
+		Method:         http.MethodPost,
+		URL:            url,
+		Headers:        headers,
+		Payload:        &apphttp.XMLPayload{Content: payload},
+		ResponseFormat: apphttp.ResponseFormatXML,
+	})
 	if err != nil {
 		return fmt.Errorf("purchase: %w", err)
 	}
+
+	out := res.Data
 
 	switch {
 	case out.FailureType == failureTemporarilyUnavailable:

@@ -94,6 +94,7 @@ var (
 	ErrPaidAppNotOwned        = errors.New("account does not own this paid app")
 	ErrSubscriptionRequired   = errors.New("subscription required")
 	ErrTemporarilyUnavailable = errors.New("temporarily unavailable")
+	ErrAppNotFound            = errors.New("app not found")
 
 	// ErrModernDownloadUnsupported reports that Apple will only serve this app's
 	// current build through the attested download-dispatch endpoints (they answer

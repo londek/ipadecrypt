@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"net/http"
 	"net/url"
 	"strings"
 
@@ -13,64 +12,31 @@ import (
 	"github.com/londek/ipadecrypt/internal/storeauth"
 )
 
-// maxCommerceRedirects bounds the pod redirects one commerce request follows.
-const maxCommerceRedirects = 4
+// downloadClient decodes Store download responses: a redirect comes back as an
+// empty result and a non-plist body as *apphttp.UnexpectedResponseError.
+func (c *Client) downloadClient() apphttp.Client[downloadResult] {
+	return apphttp.NewClient[downloadResult](apphttp.Args{CookieJar: c.jar, Executor: c.backend.Client("request")})
+}
 
-// sendCommerce posts a download request with the Store AMD proof Apple now
-// requires on commerce endpoints. The guest does not follow redirects, so
-// X-Token never reaches another host; sendCommerce follows them itself, only to
-// allowlisted commerce URLs and with a fresh single-use proof for each hop.
-// Ported from ipatool v2.8.0 sendCommerceDownloadRequest.
-func (c *Client) sendCommerce(endpoint, g string, headers map[string]string, payload map[string]any, out *downloadResult) (*http.Response, error) {
+// sendCommerce posts a download request with the single-use Store AMD proof
+// Apple requires on commerce endpoints. Requests are built with NoRedirects,
+// so X-Token never reaches another host.
+func (c *Client) sendCommerce(ctx context.Context, request apphttp.Request, g string) (apphttp.Result[downloadResult], error) {
 	hardwareID, err := hex.DecodeString(g)
 	if err != nil || len(hardwareID) != 6 {
-		return nil, errors.New("store download requires a six-byte device GUID")
+		return apphttp.Result[downloadResult]{}, errors.New("store download requires a six-byte device GUID")
 	}
 
-	headers["User-Agent"] = storeUserAgent
-
-	for redirects := 0; ; redirects++ {
-		proof, err := c.storeAMDProof(context.Background(), endpoint, hardwareID)
-		if err != nil {
-			return nil, err
-		}
-
-		for key, value := range proof {
-			headers[key] = value
-		}
-
-		*out = downloadResult{}
-
-		res, err := c.sendRequest("request", apphttp.Request{
-			Method:      http.MethodPost,
-			URL:         endpoint,
-			Headers:     headers,
-			Payload:     &apphttp.XMLPayload{Content: payload},
-			NoRedirects: true,
-		}, formatXML, out)
-		if res == nil || res.StatusCode < http.StatusMultipleChoices || res.StatusCode >= http.StatusBadRequest {
-			return res, err
-		}
-
-		location := res.Header.Get("Location")
-
-		if !apphttp.IsAuthenticationRedirect(res.StatusCode) {
-			return nil, fmt.Errorf("unsupported Store redirect (HTTP %d) to %s", res.StatusCode, redactURL(location))
-		}
-
-		if redirects == maxCommerceRedirects {
-			return nil, fmt.Errorf("too many Store redirects (HTTP %d) to %s", res.StatusCode, redactURL(location))
-		}
-
-		next, err := resolveRedirect(endpoint, location)
-		if err != nil || !isStoreAMDCommerceURL(next) {
-			return nil, fmt.Errorf("refusing Store redirect (HTTP %d) to %s", res.StatusCode, redactURL(location))
-		}
-
-		debugf("commerce %s: HTTP %d redirect to %s", redactURL(endpoint), res.StatusCode, redactURL(next))
-
-		endpoint = next
+	proof, err := c.storeAMDProof(ctx, request.URL, hardwareID)
+	if err != nil {
+		return apphttp.Result[downloadResult]{}, err
 	}
+
+	for key, value := range proof {
+		request.Headers[key] = value
+	}
+
+	return c.downloadClient().Send(request)
 }
 
 // storeAMDProof derives single-use AMD headers from the persisted Anisette
@@ -101,34 +67,6 @@ func (c *Client) storeAMDProof(ctx context.Context, endpoint string, hardwareID 
 	}
 
 	return proof, nil
-}
-
-// resolveRedirect resolves a Location header, which may be relative, against
-// the request URL.
-func resolveRedirect(endpoint, location string) (string, error) {
-	base, err := url.Parse(endpoint)
-	if err != nil {
-		return "", errors.New("invalid redirect base URL")
-	}
-
-	location = strings.TrimSpace(location)
-
-	reference, err := url.Parse(location)
-	if err != nil || location == "" {
-		return "", errors.New("invalid redirect location")
-	}
-
-	return base.ResolveReference(reference).String(), nil
-}
-
-// redactURL keeps only scheme, host and path for diagnostics.
-func redactURL(value string) string {
-	parsed, err := url.Parse(value)
-	if err != nil {
-		return "invalid URL"
-	}
-
-	return (&url.URL{Scheme: parsed.Scheme, Host: parsed.Host, Path: parsed.Path}).String()
 }
 
 // isStoreAMDCommerceURL allowlists the exact download endpoints, each with a

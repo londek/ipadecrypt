@@ -26,7 +26,7 @@ func reauth(cfg *config.Config, as *appstore.Client) error {
 		return errors.New("re-auth: no stored account; run `ipadecrypt bootstrap`")
 	}
 
-	acc, err := as.Login(cfg.Apple.Email, cfg.Apple.Password, "")
+	acc, err := as.Login(cfg.Apple.Email, cfg.Apple.Password, "", nil)
 	if err != nil {
 		return fmt.Errorf("re-auth: %w", err)
 	}
@@ -63,13 +63,13 @@ func acquireLicense(cfg *config.Config, as *appstore.Client, app appstore.App) e
 // accountWithStorefront returns the configured Apple account, overriding the
 // storefront when flag is non-empty. The override is recorded on cfg (never
 // saved), so every later cfg.Apple.Account() in this run uses it too.
-func accountWithStorefront(cfg *config.Config, flag string) (*appstore.Account, error) {
+func accountWithStorefront(as *appstore.Client, cfg *config.Config, flag string) (*appstore.Account, error) {
 	acc := cfg.Apple.Account()
 	if flag == "" {
 		return acc, nil
 	}
 
-	sf, err := appstore.ResolveStorefront(flag)
+	sf, err := as.ResolveStorefront(flag)
 	if err != nil {
 		return nil, err
 	}

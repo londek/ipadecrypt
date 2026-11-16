@@ -25,6 +25,8 @@ type VersionMetadata struct {
 	BundleVersion     string
 	SupportedDevices  []int
 	ReleaseDate       time.Time
+	// MinimumOSVersion comes from the same Info.plist read; "" when absent.
+	MinimumOSVersion string
 	// URL and FileSize describe the signed CDN download; they're populated
 	// from the same volumeDownload call that produces metadata so callers
 	// can range-fetch the zip central directory without a second hit on
@@ -35,7 +37,12 @@ type VersionMetadata struct {
 }
 
 func (c *Client) ListVersions(acc *Account, app App) (ListVersionsOutput, error) {
-	item, err := c.volumeDownload(acc, app, "")
+	res, _, err := c.volumeDownload(acc, app, "")
+	if err != nil {
+		return ListVersionsOutput{}, err
+	}
+
+	item, err := classifyDownload(res.Data, failurePasswordTokenExpired, failureSignInRequired)
 	if err != nil {
 		return ListVersionsOutput{}, err
 	}
@@ -62,33 +69,41 @@ func (c *Client) ListVersions(acc *Account, app App) (ListVersionsOutput, error)
 	}, nil
 }
 
+// GetVersionMetadata describes one version. DisplayVersion and ReleaseDate
+// come from the IPA's main Info.plist, read with range requests, because the
+// download API can return stale values; the other fields come from the item
+// metadata.
 func (c *Client) GetVersionMetadata(acc *Account, app App, externalVersionID string) (VersionMetadata, error) {
 	if externalVersionID == "" {
 		return VersionMetadata{}, errors.New("get version metadata: externalVersionID is required")
 	}
 
-	item, err := c.volumeDownload(acc, app, externalVersionID)
+	res, _, err := c.volumeDownload(acc, app, externalVersionID)
+	if err != nil {
+		return VersionMetadata{}, err
+	}
+
+	item, err := classifyDownload(res.Data, failurePasswordTokenExpired, failureSignInRequired)
 	if err != nil {
 		return VersionMetadata{}, err
 	}
 
 	ticket := DownloadTicket(item)
 
-	out := VersionMetadata{
+	metadata, err := c.readVersionMetadataFromIPA(item.URL)
+	if err != nil {
+		return VersionMetadata{}, fmt.Errorf("get version metadata: %w", err)
+	}
+
+	return VersionMetadata{
 		ExternalVersionID: externalVersionID,
-		DisplayVersion:    metaString(item.Metadata, "bundleShortVersionString"),
+		DisplayVersion:    metadata.DisplayVersion,
 		BundleVersion:     metaString(item.Metadata, "bundleVersion"),
 		SupportedDevices:  metaIntSlice(item.Metadata, "softwareSupportedDeviceIds"),
+		ReleaseDate:       metadata.ReleaseDate,
+		MinimumOSVersion:  metadata.MinimumOSVersion,
 		URL:               item.URL,
 		FileSize:          ticket.FileSize(),
 		Raw:               item.Metadata,
-	}
-
-	if rd := metaString(item.Metadata, "releaseDate"); rd != "" {
-		if t, err := time.Parse(time.RFC3339, rd); err == nil {
-			out.ReleaseDate = t
-		}
-	}
-
-	return out, nil
+	}, nil
 }

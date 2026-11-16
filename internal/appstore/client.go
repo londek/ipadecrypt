@@ -25,6 +25,9 @@ type Client struct {
 	actionSignerFactory ActionSignerFactory
 	kbsync              kbsyncStore
 
+	storefrontsMu          sync.Mutex
+	storefrontCountryCodes map[string]string
+
 	// Anisette (Apple device-identity) state, persisted next to the cookies
 	// and guarded by authMu.
 	authHTTP      *http.Client

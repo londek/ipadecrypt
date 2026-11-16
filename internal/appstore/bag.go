@@ -1,11 +1,14 @@
 package appstore
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+
+	apphttp "github.com/londek/ipadecrypt/internal/apphttp"
 )
 
 // bagResult accepts both bag layouts: endpoints wrapped in urlBag, and the
@@ -42,12 +45,17 @@ func (c *Client) fetchURLBag() (urlBag, error) {
 
 	bagURL := fmt.Sprintf("https://%s%s?ix=6&guid=%s", initDomain, initPath, g)
 
-	var out bagResult
+	client := apphttp.NewClient[bagResult](apphttp.Args{CookieJar: c.jar, Timeout: apphttp.DefaultAuthenticationTimeout, Executor: c.backend.Client("bag-direct")})
 
-	res, err := c.send("bag-direct", http.MethodGet, bagURL, map[string]string{
-		"Accept":     "application/xml",
-		"User-Agent": storeUserAgent,
-	}, nil, nil, formatXML, &out)
+	res, err := client.Send(apphttp.Request{
+		Method: http.MethodGet,
+		URL:    bagURL,
+		Headers: map[string]string{
+			"Accept":     "application/xml",
+			"User-Agent": storeUserAgent,
+		},
+		ResponseFormat: apphttp.ResponseFormatXML,
+	})
 	if err != nil {
 		return urlBag{}, fmt.Errorf("bag: %w", err)
 	}
@@ -56,6 +64,7 @@ func (c *Client) fetchURLBag() (urlBag, error) {
 		return urlBag{}, fmt.Errorf("bag: status %d", res.StatusCode)
 	}
 
+	out := res.Data
 	if out.URLBag != (urlBag{}) {
 		return out.URLBag, nil
 	}
@@ -121,13 +130,18 @@ func validateSAPConfig(config SAPConfig) error {
 		return err
 	}
 
-	for name, endpoint := range map[string]string{
-		"SAP setup":      config.SetupURL,
-		"SAP setup cert": config.CertificateURL,
-	} {
-		parsed, err := url.ParseRequestURI(endpoint)
+	endpoints := []struct {
+		name string
+		url  string
+	}{
+		{name: "SAP setup", url: config.SetupURL},
+		{name: "SAP setup cert", url: config.CertificateURL},
+	}
+
+	for _, endpoint := range endpoints {
+		parsed, err := url.ParseRequestURI(endpoint.url)
 		if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
-			return fmt.Errorf("invalid %s endpoint %q", name, endpoint)
+			return fmt.Errorf("invalid %s endpoint %q", endpoint.name, endpoint.url)
 		}
 	}
 
@@ -139,11 +153,13 @@ func validateSAPConfig(config SAPConfig) error {
 }
 
 // validateAuthenticationEndpoint ensures the authenticate endpoint is the signed
-// MZFinance authenticate path, optionally on a per-pod buy subdomain.
+// MZFinance authenticate path, optionally on a per-pod buy subdomain, or the
+// native authenticate endpoint.
 func validateAuthenticationEndpoint(endpoint string) error {
-	parsed, err := url.ParseRequestURI(endpoint)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
-		return fmt.Errorf("invalid authentication endpoint %q", endpoint)
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil ||
+		parsed.Fragment != "" || parsed.RawPath != "" || (parsed.Port() != "" && parsed.Port() != "443") {
+		return errors.New("invalid authentication endpoint")
 	}
 
 	host := strings.ToLower(parsed.Hostname())
@@ -153,15 +169,15 @@ func validateAuthenticationEndpoint(endpoint string) error {
 			return nil
 		}
 
-		return fmt.Errorf("unsupported authentication endpoint %q", endpoint)
+		return errors.New("unsupported authentication endpoint")
 	}
 
 	if host != "buy."+iTunesDomain && !strings.HasSuffix(host, "-buy."+iTunesDomain) {
-		return fmt.Errorf("unsupported authentication endpoint %q", endpoint)
+		return errors.New("unsupported authentication endpoint")
 	}
 
 	if parsed.Path != PrivateAppStoreAPIPathAuth && parsed.Path != PrivateAppStoreAPIPathAuth+"/" {
-		return fmt.Errorf("unsupported authentication endpoint %q", endpoint)
+		return errors.New("unsupported authentication endpoint")
 	}
 
 	return nil

@@ -290,9 +290,10 @@ func bootstrapSignIn(cfg *config.Config, paths *config.Paths) (*appstore.Account
 
 	for attempt := 0; attempt < 3 && account == nil; attempt++ {
 		live := tui.NewLive()
+		live.ShowElapsed()
 		live.Spin("authenticating")
 
-		account, err = as.Login(email, password, authCode)
+		account, err = as.Login(email, password, authCode, func(stage string) { live.Spin("%s", stage) })
 		switch {
 		case errors.Is(err, appstore.ErrAuthCodeRequired):
 			live.Stop()
@@ -319,7 +320,7 @@ func bootstrapSignIn(cfg *config.Config, paths *config.Paths) (*appstore.Account
 
 	cfg.Apple.SetAccount(account)
 
-	appStoreCountry, err := appstore.CountryCodeFromStoreFront(account.StoreFront)
+	appStoreCountry, err := as.CountryCodeFromStoreFront(account.StoreFront)
 	if err != nil {
 		return nil, fmt.Errorf("resolve appstore country code: %w", err)
 	}
