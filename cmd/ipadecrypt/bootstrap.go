@@ -12,6 +12,7 @@ import (
 	"github.com/londek/ipadecrypt/internal/config"
 	"github.com/londek/ipadecrypt/internal/credmint"
 	"github.com/londek/ipadecrypt/internal/device"
+	"github.com/londek/ipadecrypt/internal/testflight"
 	"github.com/londek/ipadecrypt/internal/tui"
 	"github.com/londek/ipadecrypt/internal/updater"
 	"github.com/spf13/cobra"
@@ -30,15 +31,18 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 	if bootstrapReset {
 		cfg.Apple = config.Apple{}
 		cfg.Device = config.Device{Port: 22}
+		cfg.TestFlight = config.TestFlight{}
 
 		if err := cfg.Save(); err != nil {
 			tui.Err("reset config: %v", err)
 			return
 		}
 
-		if err := os.Remove(filepath.Join(paths.Root, appstore.AnisetteFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
-			tui.Err("reset Apple authentication state: %v", err)
-			return
+		for _, name := range []string{appstore.AnisetteFile, appstore.AccountAnisetteFile} {
+			if err := os.Remove(filepath.Join(paths.Root, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				tui.Err("reset Apple authentication state: %v", err)
+				return
+			}
 		}
 	}
 
@@ -126,9 +130,29 @@ func bootstrapHandler(cmd *cobra.Command, args []string) {
 	// ---- Step 3: on-device decrypt fallback readiness ----------------
 
 	verifyDeviceDecryptReady(cfg)
+	bootstrapTestFlightSession(cmd.Context(), cfg, paths)
 
 	tui.Spacer()
 	tui.OK("bootstrap complete - run `ipadecrypt decrypt <bundle-id|app-store-id|app-store-url|path-to-local-ipa>`")
+}
+
+// TestFlight is optional. Secondary authentication can be completed later with
+// bootstrap testflight, without repeating App Store or device bootstrap.
+func bootstrapTestFlightSession(ctx context.Context, cfg *config.Config, paths *config.Paths) {
+	hadSession := cfg.TestFlight.SessionID != "" && cfg.TestFlight.AccountID != ""
+
+	tui.Spacer()
+	tui.Info("Checking TestFlight authentication…")
+
+	_, _, _, err := withTestFlightSession(ctx, cfg, paths, false, false, (*testflight.Client).ListApps)
+	switch {
+	case errors.Is(err, appstore.ErrAuthCodeRequired):
+		tui.Info("TestFlight needs verification - skipped.\nRun `ipadecrypt bootstrap testflight` to finish signing in later.")
+	case err != nil:
+		tui.Info("TestFlight setup skipped: %v\nRun `ipadecrypt bootstrap testflight` to retry later.", err)
+	case hadSession:
+		tui.OK("TestFlight session ready")
+	}
 }
 
 // mintArcadeCredential mints the account's Apple Arcade credential when an

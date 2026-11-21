@@ -49,6 +49,42 @@ func (p *Paths) CachedEncryptedIPA(bundleID string, version string) (string, err
 	return filepath.Join(dir, fmt.Sprintf("%s_%s.ipa", bundleID, version)), nil
 }
 
+func (p *Paths) CachedTestFlightIPA(dsid, version string, appID, buildID int64) (string, error) {
+	if !validCacheComponent(dsid) || !validCacheComponent(version) || appID <= 0 || buildID <= 0 {
+		return "", fmt.Errorf("invalid TestFlight cache identity")
+	}
+
+	dir, err := p.CacheDir()
+	if err != nil {
+		return "", err
+	}
+
+	dir, err = p.ensure(filepath.Join(dir, "testflight", "accounts", dsid, fmt.Sprint(appID), version, fmt.Sprint(buildID)))
+	if err != nil {
+		return "", err
+	}
+
+	return filepath.Join(dir, "package.ipa"), nil
+}
+
+func validCacheComponent(value string) bool {
+	if value == "" || value == "." || value == ".." {
+		return false
+	}
+
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			c == '.' || c == '_' || c == '-' {
+			continue
+		}
+
+		return false
+	}
+
+	return true
+}
+
 func (p *Paths) VersionsCacheFile(bundleID string) (string, error) {
 	dir, err := p.CacheDir()
 	if err != nil {

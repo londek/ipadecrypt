@@ -26,6 +26,16 @@ type kbsyncStore struct {
 	blob string
 }
 
+// TestFlightKBSync returns the account-bound FairPlay device information that
+// TestFlight requires when authorizing a build download.
+func (c *Client) TestFlightKBSync(ctx context.Context, dsid uint64, hardwareID []byte) (string, error) {
+	if len(hardwareID) != 20 {
+		return "", errors.New("TestFlight kbsync requires a twenty-byte device identity")
+	}
+
+	return c.generateKBSync(ctx, hardwareID, dsid)
+}
+
 // generateKBSync returns the base64 FairPlay attestation blob the ent/download
 // endpoint requires, producing it with the StoreAgent guest. Mirrors ipatool
 // generateKBSync.
