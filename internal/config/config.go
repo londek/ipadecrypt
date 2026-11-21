@@ -17,10 +17,19 @@ type Config struct {
 	Version     int         `json:"version"`
 	Apple       Apple       `json:"apple"`
 	Device      Device      `json:"device"`
+	TestFlight  TestFlight  `json:"testFlight,omitzero"`
 	Versions    Versions    `json:"versions,omitempty"`
 	UpdateCheck UpdateCheck `json:"updateCheck,omitzero"`
 
 	path string
+}
+
+// TestFlight holds the renewable session authenticated with the Apple account.
+// No activation or device install response is persisted.
+type TestFlight struct {
+	SessionID string `json:"sessionId,omitempty"`
+	AccountID string `json:"accountId,omitempty"`
+	DeviceID  string `json:"deviceId,omitempty"`
 }
 
 type UpdateCheck struct {

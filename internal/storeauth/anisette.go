@@ -51,6 +51,16 @@ type machineProvisioningEnvelope struct {
 // AnisetteHeaders provisions a local software identity when necessary and
 // returns a fresh machine-validation proof.
 func AnisetteHeaders(ctx context.Context, client *http.Client, encoded []byte) (http.Header, []byte, error) {
+	return machineHeaders(ctx, client, encoded, false)
+}
+
+// AccountHeaders preserves the GrandSlam machine identity between sign-ins.
+// Keep this state separate from Store AMD provisioning, which replaces its DB.
+func AccountHeaders(ctx context.Context, client *http.Client, encoded []byte) (http.Header, []byte, error) {
+	return machineHeaders(ctx, client, encoded, true)
+}
+
+func machineHeaders(ctx context.Context, client *http.Client, encoded []byte, reuse bool) (http.Header, []byte, error) {
 	if ctx == nil {
 		return nil, nil, errors.New("anisette context is nil")
 	}
@@ -65,22 +75,26 @@ func AnisetteHeaders(ctx context.Context, client *http.Client, encoded []byte) (
 
 	// Store provisioning replaces the ADI database. If its proof cannot be
 	// reused, start general machine provisioning from the persisted identity.
-	state.Provisioning = nil
-	state.RoutingInfo = 0
+	if !reuse {
+		state.Provisioning = nil
+		state.RoutingInfo = 0
+	}
 
 	bundle, err := assets.Load(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("load anisette assets: %w", err)
 	}
 
-	adi, err := machine.OpenModernADI(ctx, bundle, state.Identifier, nil)
+	adi, err := machine.OpenModernADI(ctx, bundle, state.Identifier, state.Provisioning)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open anisette runtime: %w", err)
 	}
 	defer func() { _ = adi.Close() }()
 
-	if err = provisionMachine(ctx, client, state, adi); err != nil {
-		return nil, nil, err
+	if len(state.Provisioning) == 0 {
+		if err = provisionMachine(ctx, client, state, adi); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	mid, otp, err := adi.RequestOTP(machineDSID)

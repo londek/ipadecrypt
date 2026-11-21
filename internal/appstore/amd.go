@@ -48,6 +48,31 @@ func (c *Client) storeAMDProof(ctx context.Context, endpoint string, hardwareID 
 		return nil, errors.New("store AMD proof endpoint is not allowlisted")
 	}
 
+	return c.amdProof(ctx, endpoint, hardwareID)
+}
+
+// TestFlightAMDHeaders derives the same single-use AppleMediaServices proof
+// TestFlight requests on its API calls. Only the exact TestFlight API origin
+// may receive the proof.
+func (c *Client) TestFlightAMDHeaders(ctx context.Context, endpoint string) (map[string]string, error) {
+	if !isTestFlightAPIURL(endpoint) {
+		return nil, errors.New("TestFlight AMD proof endpoint is not allowlisted")
+	}
+
+	mac, err := macAddress()
+	if err != nil {
+		return nil, err
+	}
+
+	_, hardwareID, err := machineIdentity(mac)
+	if err != nil {
+		return nil, err
+	}
+
+	return c.amdProof(ctx, endpoint, hardwareID)
+}
+
+func (c *Client) amdProof(ctx context.Context, endpoint string, hardwareID []byte) (map[string]string, error) {
 	c.authMu.Lock()
 	defer c.authMu.Unlock()
 
@@ -67,6 +92,26 @@ func (c *Client) storeAMDProof(ctx context.Context, endpoint string, hardwareID 
 	}
 
 	return proof, nil
+}
+
+func isTestFlightAPIURL(endpoint string) bool {
+	if strings.Contains(endpoint, "#") {
+		return false
+	}
+
+	parsed, err := url.ParseRequestURI(endpoint)
+	if err != nil || parsed.Scheme != "https" || parsed.User != nil || parsed.Fragment != "" ||
+		parsed.RawPath != "" || parsed.Opaque != "" || parsed.RawQuery != "" || parsed.ForceQuery ||
+		(parsed.Port() != "" && parsed.Port() != "443") || strings.ToLower(parsed.Hostname()) != "testflight.apple.com" {
+		return false
+	}
+
+	parts := strings.Split(strings.TrimPrefix(parsed.Path, "/"), "/")
+	if len(parts) < 2 || len(parts[0]) != 2 || parts[0][0] != 'v' || parts[0][1] < '1' || parts[0][1] > '9' {
+		return false
+	}
+
+	return true
 }
 
 // isStoreAMDCommerceURL allowlists the exact download endpoints, each with a

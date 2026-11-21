@@ -50,6 +50,10 @@ var (
 
 	versionsStorefront   string
 	versionsLogResponses bool
+
+	testFlightUDID       string
+	testFlightVersion    string
+	testFlightLinkAccept bool
 )
 
 func main() {
@@ -68,11 +72,21 @@ func main() {
 	bootstrap := &cobra.Command{
 		Use:   "bootstrap",
 		Short: "Interactive setup. App Store sign-in and one-time credential minting",
+		Args:  cobra.NoArgs,
 		Run:   bootstrapHandler,
 	}
 	bootstrap.Flags().BoolVar(&bootstrapReset, "reset", false, "forget cached credentials and re-prompt")
 	bootstrap.Flags().BoolVar(&bootstrapSkipLogin, "skip-login", false, "do not login to the App Store. ipadecrypt won't be able to use any App Store related features")
 	bootstrap.Flags().BoolVar(&bootstrapRemint, "remint", false, "re-run credential minting even if one is already cached for the account")
+
+	bootstrapTestFlight := &cobra.Command{
+		Use:   "testflight",
+		Short: "Add or refresh TestFlight authentication with your Apple account",
+		Args:  cobra.NoArgs,
+		Run:   testFlightBootstrapHandler,
+	}
+	bootstrapTestFlight.Flags().StringVar(&testFlightUDID, "udid", "", "override the TestFlight download identity (40 hexadecimal digits)")
+	bootstrap.AddCommand(bootstrapTestFlight)
 
 	decrypt := &cobra.Command{
 		Use:   "decrypt <bundle-id|app-store-id|app-store-url|path-to-local-ipa>",
@@ -104,7 +118,49 @@ func main() {
 	versions.Flags().StringVar(&versionsStorefront, "storefront", "", "override App Store storefront (numeric ID or two-letter country code, e.g. 143441 or US)")
 	versions.Flags().BoolVar(&versionsLogResponses, "log-responses", false, "append each API response as a JSONL record to ~/.ipadecrypt/logs/versions.log")
 
-	root.AddCommand(bootstrap, decrypt, versions)
+	testFlight := &cobra.Command{
+		Use:   "testflight",
+		Short: "Browse and decrypt TestFlight apps",
+	}
+	testFlight.PersistentFlags().StringVar(&testFlightUDID, "udid", "", "override the TestFlight download identity (40 hexadecimal digits)")
+	testFlight.AddCommand(&cobra.Command{
+		Use:   "apps",
+		Short: "List TestFlight developers and apps",
+		Long:  "Lists TestFlight developers and apps. If the saved session is missing or expired, signs in with the saved Apple credentials and retries automatically.",
+		Args:  cobra.NoArgs,
+		Run:   testFlightAppsHandler,
+	})
+	testFlight.AddCommand(&cobra.Command{
+		Use:   "versions <app-id>",
+		Short: "List available TestFlight versions",
+		Args:  cobra.ExactArgs(1),
+		Run:   testFlightVersionsHandler,
+	})
+	testFlightLink := &cobra.Command{
+		Use:   "link <link-or-code>",
+		Short: "Preview or accept a TestFlight public link",
+		Args:  cobra.ExactArgs(1),
+		Run:   testFlightLinkHandler,
+	}
+	testFlightLink.Flags().BoolVar(&testFlightLinkAccept, "accept", false, "accept the public TestFlight invitation")
+	testFlight.AddCommand(testFlightLink)
+
+	testFlightDecrypt := &cobra.Command{
+		Use:   "decrypt <app-id>",
+		Short: "Download and decrypt a TestFlight version",
+		Args:  cobra.ExactArgs(1),
+		Run:   testFlightDecryptHandler,
+	}
+	testFlightDecrypt.Flags().StringVar(&testFlightVersion, "version", "", "TestFlight version to download (default: newest available)")
+	testFlightDecrypt.Flags().StringVarP(&decryptOutput, "output", "o", "", "output path for the decrypted IPA")
+	testFlightDecrypt.Flags().BoolVar(&decryptNoVerify, "no-verify", false, "skip the post-decrypt Mach-O verification pass")
+	testFlightDecrypt.Flags().BoolVar(&decryptExtraVerify, "extra-verify", false, "also byte-compare every output Mach-O against its source counterpart")
+	testFlightDecrypt.Flags().BoolVar(&decryptSkipAppex, "skip-appex", false, "skip app extensions (*.appex); they stay encrypted in the output IPA")
+	testFlightDecrypt.Flags().BoolVar(&decryptKeepWatch, "keep-watch", false, "keep and decrypt the Watch app instead of removing it")
+	testFlightDecrypt.Flags().BoolVarP(&decryptVerbose, "verbose", "v", false, "print the output path during decryption")
+	testFlight.AddCommand(testFlightDecrypt)
+
+	root.AddCommand(bootstrap, decrypt, versions, testFlight)
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)

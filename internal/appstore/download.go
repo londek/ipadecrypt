@@ -571,6 +571,16 @@ func (c *Client) CompleteDownload(acc *Account, ticket DownloadTicket, outPath s
 	return DownloadOutput{DestinationPath: outPath, Sinfs: item.Sinfs}, nil
 }
 
+// FetchPackage reuses the Store CDN transfer and resume logic for a package.
+func (c *Client) FetchPackage(src, dst string, onProgress func(cur, total int64)) error {
+	return c.fetchToFile(src, dst, onProgress)
+}
+
+// PatchPackage injects the account metadata and licensing from an authorized ticket.
+func PatchPackage(src, dst string, ticket DownloadTicket, acc *Account) error {
+	return applyPatches(src, dst, downloadItem(ticket), acc)
+}
+
 type platformPackageInfo struct {
 	SupportedPlatforms []string `plist:"CFBundleSupportedPlatforms,omitempty"`
 }
@@ -586,6 +596,8 @@ func validatePackagePlatform(path string) error {
 	}
 
 	defer zr.Close()
+
+	registerAppleZIPDecompressor(&zr.Reader)
 
 	for _, f := range zr.File {
 		if !isTopLevelAppInfoPlist(f.Name) {
@@ -835,6 +847,8 @@ func applyPatches(src, dst string, item downloadItem, acc *Account) (err error) 
 
 	defer zr.Close()
 
+	registerAppleZIPDecompressor(&zr.Reader)
+
 	df, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", dst, err)
@@ -916,6 +930,12 @@ func joinCleanupError(err error, message string, cleanupErr error) error {
 // replicateZip copies every entry's compressed bytes and local-header extra
 // verbatim.
 func replicateZip(src *zip.ReadCloser, dst *zip.Writer, sourcePath string) error {
+	if slices.ContainsFunc(src.File, func(file *zip.File) bool {
+		return file.Method == appleLZFSEMethod
+	}) {
+		return replicateAppleZIP(src, dst)
+	}
+
 	source, err := os.Open(sourcePath)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", sourcePath, err)
@@ -967,6 +987,47 @@ func replicateZip(src *zip.ReadCloser, dst *zip.Writer, sourcePath string) error
 
 		if _, err := io.Copy(w, srcFile); err != nil {
 			return err
+		}
+	}
+
+	return nil
+}
+
+// replicateAppleZIP rewrites Apple's method-99 archives instead of copying
+// their private local-header layout. All members are CRC-checked by archive/zip
+// and emitted using standard Store or Deflate compression.
+func replicateAppleZIP(src *zip.ReadCloser, dst *zip.Writer) error {
+	for _, file := range src.File {
+		r, err := file.Open()
+		if err != nil {
+			return err
+		}
+
+		header := file.FileHeader
+
+		header.Extra = zipExtraWithoutZIP64(header.Extra)
+		if strings.HasSuffix(header.Name, "/") {
+			header.Method = zip.Store
+		} else {
+			header.Method = zip.Deflate
+		}
+
+		w, err := dst.CreateHeader(&header)
+		if err != nil {
+			_ = r.Close()
+
+			return err
+		}
+
+		_, copyErr := io.Copy(w, r)
+		closeErr := r.Close()
+
+		if copyErr != nil {
+			return copyErr
+		}
+
+		if closeErr != nil {
+			return closeErr
 		}
 	}
 

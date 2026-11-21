@@ -41,3 +41,18 @@ func TestStoreAMDAllowlistAndDSIDFallback(t *testing.T) {
 		t.Errorf("machine action = %+v", a)
 	}
 }
+
+func TestTestFlightAMDAllowlist(t *testing.T) {
+	for endpoint, want := range map[string]bool{
+		"https://testflight.apple.com/v4/accounts/account/apps":        true,
+		"https://testflight.apple.com/v1/session/authenticate":         true,
+		"https://testflight.apple.com/":                                false,
+		"https://testflight.apple.com/v4/accounts/account/apps?x=1":    false,
+		"https://testflight.apple.com.evil.example/v4/accounts/a/apps": false,
+		"http://testflight.apple.com/v4/accounts/account/apps":         false,
+	} {
+		if got := isTestFlightAPIURL(endpoint); got != want {
+			t.Errorf("isTestFlightAPIURL(%q) = %v, want %v", endpoint, got, want)
+		}
+	}
+}

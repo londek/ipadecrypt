@@ -113,6 +113,19 @@ decrypting it on the device. Useful flags:
 ipadecrypt versions <bundle-id|app-store-id|app-store-url>
 ```
 
+### TestFlight
+
+Uses the Apple Account from bootstrap. Run `bootstrap testflight` if additional
+verification is needed; saved sessions renew automatically.
+
+```sh
+ipadecrypt bootstrap testflight
+ipadecrypt testflight apps
+ipadecrypt testflight versions <app-id>
+ipadecrypt testflight link <link-or-code> [--accept]
+ipadecrypt testflight decrypt <app-id> [--version <version>]
+```
+
 ## Known issues
 
 - Only the supported SINF/SUPF/SUPP license formats decrypt offline; apps shipping a newer, unsupported `SC_Info` format fall back to the on-device path when a device is configured.

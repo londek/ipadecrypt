@@ -82,6 +82,16 @@ func Bullet(format string, args ...any) {
 	fmt.Fprintln(Out, "    "+paint(ansiDim, "• "+fmt.Sprintf(format, args...)))
 }
 
+// Heading renders a primary list heading without dimming it like prose.
+func Heading(format string, args ...any) {
+	fmt.Fprintln(Out, "  "+paint(ansiBold, fmt.Sprintf(format, args...)))
+}
+
+// Item renders a primary list item with the standard accent marker.
+func Item(format string, args ...any) {
+	fmt.Fprintln(Out, "    "+paint(ansiCyan, "•")+" "+fmt.Sprintf(format, args...))
+}
+
 // Fields renders aligned "key: value" pairs. Call as Fields(k1, v1, k2, v2, …).
 // Pairs where the value is empty are skipped so callers can include optional
 // fields without branching.

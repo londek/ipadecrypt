@@ -210,6 +210,7 @@ func expandUser(path string) (string, error) {
 func (c *Client) Close() {
 	c.sftp.Close()
 	c.ssh.Close()
+	c.closeTunnel()
 }
 
 // shellQuote wraps s in single quotes for safe interpolation into a POSIX
